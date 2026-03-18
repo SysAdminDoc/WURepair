@@ -6,10 +6,14 @@
     Includes service management, cache clearing, component re-registration,
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
+
+    v2.1.0 adds diagnostic pre-check report, selective repair via parameters,
+    progress tracking, event log integration, and post-repair verification
+    with before/after comparison.
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.0.0
+    Version: 2.1.0
 #>
 
 #Requires -RunAsAdministrator
@@ -25,6 +29,8 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
+    Version        = '2.1.0'
+    EventSource    = 'WURepair'
 }
 
 # Windows Update related services - with correct start types
@@ -101,10 +107,10 @@ function Write-Log {
         [ValidateSet('INFO', 'SUCCESS', 'WARNING', 'ERROR', 'SECTION')]
         [string]$Level = 'INFO'
     )
-    
+
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $logMessage = "[$timestamp] [$Level] $Message"
-    
+
     $colors = @{
         'INFO'    = 'Cyan'
         'SUCCESS' = 'Green'
@@ -112,7 +118,7 @@ function Write-Log {
         'ERROR'   = 'Red'
         'SECTION' = 'Magenta'
     }
-    
+
     switch ($Level) {
         'SECTION' {
             Write-Host ""
@@ -133,7 +139,7 @@ function Write-Log {
             Write-Host "    $Message" -ForegroundColor $colors[$Level]
         }
     }
-    
+
     Add-Content -Path $Script:Config.LogPath -Value $logMessage -ErrorAction SilentlyContinue
 }
 
@@ -141,10 +147,8 @@ function Show-Banner {
     Clear-Host
     $banner = @"
 
-    ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
-    ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
-    ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.0
+    WURepair v$($Script:Config.Version)
+    Windows Update Repair Tool
     ─────────────────────────────────
 
 "@
@@ -174,20 +178,223 @@ function Get-ServiceStatus {
 }
 
 # ============================================================================
-# NEW: HOSTS FILE REPAIR
+# EVENT LOG INTEGRATION
+# ============================================================================
+
+function Initialize-EventSource {
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists($Script:Config.EventSource)) {
+            [System.Diagnostics.EventLog]::CreateEventSource($Script:Config.EventSource, 'Application')
+        }
+    }
+    catch {
+        # Source creation may fail if already registered to another log; ignore
+    }
+}
+
+function Write-RepairEventLog {
+    param(
+        [string]$Message,
+        [System.Diagnostics.EventLogEntryType]$EntryType = [System.Diagnostics.EventLogEntryType]::Information,
+        [int]$EventId = 1000
+    )
+    try {
+        Write-EventLog -LogName 'Application' -Source $Script:Config.EventSource -EventId $EventId -EntryType $EntryType -Message $Message -ErrorAction SilentlyContinue
+    }
+    catch { }
+}
+
+# ============================================================================
+# DIAGNOSTIC PRE-CHECK REPORT
+# ============================================================================
+
+function Get-DiagnosticReport {
+    <#
+    .SYNOPSIS
+        Collects comprehensive health check data and returns a hashtable snapshot.
+        Displayed as a formatted status table.
+    #>
+    Write-Log "DIAGNOSTIC HEALTH CHECK" -Level SECTION
+
+    $report = @{}
+
+    # -- Service statuses --
+    $coreServices = @('wuauserv', 'bits', 'cryptsvc', 'msiserver')
+    $serviceResults = @()
+    foreach ($svcName in $coreServices) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) {
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName"
+            $startVal = (Get-ItemProperty -Path $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
+            $startLabel = switch ($startVal) { 0 { 'Boot' } 1 { 'System' } 2 { 'Automatic' } 3 { 'Manual' } 4 { 'Disabled' } default { 'Unknown' } }
+            $statusLabel = "$($svc.Status) ($startLabel)"
+        } else {
+            $statusLabel = 'Not Found'
+        }
+        $serviceResults += [PSCustomObject]@{ Component = $svc.DisplayName; Status = $statusLabel }
+    }
+    $report['Services'] = $serviceResults
+
+    # -- SoftwareDistribution folder --
+    $sdPath = "$env:SystemRoot\SoftwareDistribution"
+    if (Test-Path $sdPath) {
+        $sdSize = (Get-ChildItem -Path $sdPath -Recurse -Force -ErrorAction SilentlyContinue |
+                   Measure-Object -Property Length -Sum).Sum
+        $sdSizeMB = [math]::Round($sdSize / 1MB, 2)
+        $sdLastMod = (Get-Item $sdPath -Force -ErrorAction SilentlyContinue).LastWriteTime
+        $report['SoftwareDistribution'] = "$sdSizeMB MB | Modified: $($sdLastMod.ToString('yyyy-MM-dd HH:mm'))"
+    } else {
+        $report['SoftwareDistribution'] = 'Not Found'
+    }
+
+    # -- catroot2 folder --
+    $crPath = "$env:SystemRoot\System32\catroot2"
+    if (Test-Path $crPath) {
+        $crSize = (Get-ChildItem -Path $crPath -Recurse -Force -ErrorAction SilentlyContinue |
+                   Measure-Object -Property Length -Sum).Sum
+        $crSizeMB = [math]::Round($crSize / 1MB, 2)
+        $crLastMod = (Get-Item $crPath -Force -ErrorAction SilentlyContinue).LastWriteTime
+        $report['Catroot2'] = "$crSizeMB MB | Modified: $($crLastMod.ToString('yyyy-MM-dd HH:mm'))"
+    } else {
+        $report['Catroot2'] = 'Not Found'
+    }
+
+    # -- DISM CheckHealth --
+    $dismResult = DISM /Online /Cleanup-Image /CheckHealth 2>&1
+    $dismText = ($dismResult | Out-String)
+    if ($dismText -match 'No component store corruption detected') {
+        $report['DISMHealth'] = 'Healthy'
+    } elseif ($dismText -match 'repairable') {
+        $report['DISMHealth'] = 'Repairable'
+    } else {
+        $report['DISMHealth'] = 'Corrupted / Unknown'
+    }
+
+    # -- Pending reboot --
+    $pendingReboot = $false
+    $rebootPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
+        'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations'
+    )
+    foreach ($path in $rebootPaths) {
+        if (Test-Path $path) { $pendingReboot = $true; break }
+    }
+    $report['PendingReboot'] = if ($pendingReboot) { 'Yes' } else { 'No' }
+
+    # -- Last successful update --
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
+        $searcher = $session.CreateUpdateSearcher()
+        $historyCount = $searcher.GetTotalHistoryCount()
+        if ($historyCount -gt 0) {
+            $lastUpdate = $searcher.QueryHistory(0, 1) | Select-Object -First 1
+            $report['LastSuccessfulUpdate'] = $lastUpdate.Date.ToString('yyyy-MM-dd HH:mm')
+        } else {
+            $report['LastSuccessfulUpdate'] = 'No history found'
+        }
+    } catch {
+        $report['LastSuccessfulUpdate'] = 'Unable to query'
+    }
+
+    # -- Last 5 Windows Update errors from event log --
+    $wuErrors = @()
+    try {
+        $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'System'
+            ProviderName = 'Microsoft-Windows-WindowsUpdateClient'
+            Level = 2  # Error
+        } -MaxEvents 5 -ErrorAction SilentlyContinue
+        foreach ($evt in $events) {
+            $wuErrors += [PSCustomObject]@{
+                Time    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm')
+                Message = ($evt.Message -replace "`r`n|`n", ' ').Substring(0, [Math]::Min(100, $evt.Message.Length))
+            }
+        }
+    } catch { }
+    $report['WUErrors'] = $wuErrors
+
+    # -- Display formatted table --
+    Write-Host ""
+    Write-Host "  +--------------------------------------------+----------------------------+" -ForegroundColor DarkGray
+    Write-Host "  | Component                                  | Status                     |" -ForegroundColor DarkGray
+    Write-Host "  +--------------------------------------------+----------------------------+" -ForegroundColor DarkGray
+
+    foreach ($svc in $report['Services']) {
+        $comp = $svc.Component.PadRight(42)
+        $stat = $svc.Status.PadRight(26)
+        $color = if ($svc.Status -match 'Disabled') { 'Red' } elseif ($svc.Status -match 'Stopped') { 'Yellow' } else { 'Green' }
+        Write-Host "  | $comp | " -ForegroundColor DarkGray -NoNewline
+        Write-Host "$stat" -ForegroundColor $color -NoNewline
+        Write-Host " |" -ForegroundColor DarkGray
+    }
+
+    $infoRows = @(
+        @{ Label = 'SoftwareDistribution'; Value = $report['SoftwareDistribution'] },
+        @{ Label = 'catroot2'; Value = $report['Catroot2'] },
+        @{ Label = 'DISM Health'; Value = $report['DISMHealth'] },
+        @{ Label = 'Pending Reboot'; Value = $report['PendingReboot'] },
+        @{ Label = 'Last Successful Update'; Value = $report['LastSuccessfulUpdate'] }
+    )
+
+    foreach ($row in $infoRows) {
+        $lbl = $row.Label.PadRight(42)
+        $val = $row.Value.PadRight(26)
+        $color = 'Cyan'
+        if ($row.Label -eq 'DISM Health') {
+            $color = switch ($row.Value) { 'Healthy' { 'Green' } 'Repairable' { 'Yellow' } default { 'Red' } }
+        }
+        if ($row.Label -eq 'Pending Reboot') {
+            $color = if ($row.Value -eq 'Yes') { 'Yellow' } else { 'Green' }
+        }
+        Write-Host "  | $lbl | " -ForegroundColor DarkGray -NoNewline
+        Write-Host "$val" -ForegroundColor $color -NoNewline
+        Write-Host " |" -ForegroundColor DarkGray
+    }
+
+    Write-Host "  +--------------------------------------------+----------------------------+" -ForegroundColor DarkGray
+
+    # Show last 5 WU errors
+    if ($report['WUErrors'].Count -gt 0) {
+        Write-Host ""
+        Write-Host "  Last Windows Update Errors:" -ForegroundColor Yellow
+        foreach ($err in $report['WUErrors']) {
+            Write-Host "    [$($err.Time)] $($err.Message)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host ""
+        Write-Host "  No recent Windows Update errors in event log." -ForegroundColor Green
+    }
+    Write-Host ""
+
+    # Log all values
+    foreach ($svc in $report['Services']) {
+        Write-Log "$($svc.Component): $($svc.Status)"
+    }
+    Write-Log "SoftwareDistribution: $($report['SoftwareDistribution'])"
+    Write-Log "catroot2: $($report['Catroot2'])"
+    Write-Log "DISM Health: $($report['DISMHealth'])"
+    Write-Log "Pending Reboot: $($report['PendingReboot'])"
+    Write-Log "Last Successful Update: $($report['LastSuccessfulUpdate'])"
+
+    return $report
+}
+
+# ============================================================================
+# HOSTS FILE REPAIR
 # ============================================================================
 
 function Repair-HostsFile {
     Write-Log "HOSTS FILE - Removing Microsoft Domain Blocks" -Level SECTION
-    
+
     $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
     $backupPath = "$env:SystemRoot\System32\drivers\etc\hosts.backup.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-    
+
     if (-not (Test-Path $hostsPath)) {
         Write-Log "Hosts file not found" -Level WARNING
         return
     }
-    
+
     # Backup hosts file
     try {
         Copy-Item -Path $hostsPath -Destination $backupPath -Force -ErrorAction Stop
@@ -196,7 +403,7 @@ function Repair-HostsFile {
     catch {
         Write-Log "Could not backup hosts file: $($_.Exception.Message)" -Level WARNING
     }
-    
+
     # Read current hosts file
     try {
         $hostsContent = Get-Content -Path $hostsPath -ErrorAction Stop
@@ -205,13 +412,13 @@ function Repair-HostsFile {
         Write-Log "Could not read hosts file" -Level ERROR
         return
     }
-    
+
     $removedCount = 0
     $newContent = @()
-    
+
     foreach ($line in $hostsContent) {
         $shouldRemove = $false
-        
+
         # Check if line contains any Microsoft domain we need
         foreach ($domain in $Script:MicrosoftDomains) {
             if ($line -match [regex]::Escape($domain)) {
@@ -224,12 +431,12 @@ function Repair-HostsFile {
                 }
             }
         }
-        
+
         if (-not $shouldRemove) {
             $newContent += $line
         }
     }
-    
+
     if ($removedCount -gt 0) {
         try {
             # Remove read-only attribute if present
@@ -237,7 +444,7 @@ function Repair-HostsFile {
             if ($file.IsReadOnly) {
                 $file.IsReadOnly = $false
             }
-            
+
             Set-Content -Path $hostsPath -Value $newContent -Force -ErrorAction Stop
             Write-Log "Removed $removedCount Microsoft domain blocks from hosts file" -Level SUCCESS
         }
@@ -252,12 +459,12 @@ function Repair-HostsFile {
 }
 
 # ============================================================================
-# NEW: SSL/TLS CONFIGURATION REPAIR
+# SSL/TLS CONFIGURATION REPAIR
 # ============================================================================
 
 function Repair-TLSConfiguration {
     Write-Log "SSL/TLS - Repairing Secure Connection Settings" -Level SECTION
-    
+
     # Enable TLS 1.2 (required for Windows Update)
     $protocols = @(
         @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client'; Name = 'Enabled'; Value = 1 },
@@ -265,7 +472,7 @@ function Repair-TLSConfiguration {
         @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server'; Name = 'Enabled'; Value = 1 },
         @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server'; Name = 'DisabledByDefault'; Value = 0 }
     )
-    
+
     foreach ($setting in $protocols) {
         try {
             if (-not (Test-Path $setting.Path)) {
@@ -276,13 +483,13 @@ function Repair-TLSConfiguration {
         catch { }
     }
     Write-Log "TLS 1.2 enabled" -Level SUCCESS
-    
+
     # Set .NET to use system default TLS
     $netPaths = @(
         'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319'
     )
-    
+
     foreach ($path in $netPaths) {
         try {
             if (Test-Path $path) {
@@ -293,7 +500,7 @@ function Repair-TLSConfiguration {
         catch { }
     }
     Write-Log ".NET configured to use strong cryptography" -Level SUCCESS
-    
+
     # Reset Internet Settings
     try {
         $inetPath = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -303,7 +510,7 @@ function Repair-TLSConfiguration {
         Write-Log "Proxy settings cleared" -Level SUCCESS
     }
     catch { }
-    
+
     # Force PowerShell to use TLS 1.2 for this session
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -313,19 +520,19 @@ function Repair-TLSConfiguration {
 }
 
 # ============================================================================
-# NEW: FIREWALL RULES REPAIR
+# FIREWALL RULES REPAIR
 # ============================================================================
 
 function Repair-FirewallRules {
     Write-Log "FIREWALL - Ensuring Windows Update Traffic Allowed" -Level SECTION
-    
+
     # Remove any rules blocking Windows Update
     try {
         $blockingRules = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {
             ($_.DisplayName -match 'Windows Update|BITS|wuauserv|dosvc' -and $_.Action -eq 'Block') -or
             ($_.DisplayName -match 'Block.*Microsoft' -or $_.DisplayName -match 'Block.*Update')
         }
-        
+
         foreach ($rule in $blockingRules) {
             try {
                 Remove-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
@@ -337,14 +544,14 @@ function Repair-FirewallRules {
     catch {
         Write-Log "Could not query firewall rules" -Level WARNING
     }
-    
+
     # Ensure Windows Update services are allowed
     $servicesToAllow = @(
         @{ Name = 'svchost.exe'; Path = "$env:SystemRoot\System32\svchost.exe" },
         @{ Name = 'wuauclt.exe'; Path = "$env:SystemRoot\System32\wuauclt.exe" },
         @{ Name = 'UsoClient.exe'; Path = "$env:SystemRoot\System32\UsoClient.exe" }
     )
-    
+
     foreach ($svc in $servicesToAllow) {
         if (Test-Path $svc.Path) {
             try {
@@ -366,12 +573,12 @@ function Repair-FirewallRules {
 }
 
 # ============================================================================
-# NEW: SERVICE DEPENDENCY REPAIR
+# SERVICE DEPENDENCY REPAIR
 # ============================================================================
 
 function Repair-ServiceDependencies {
     Write-Log "DEPENDENCIES - Repairing Service Dependencies" -Level SECTION
-    
+
     # Ensure BITS dependencies are running
     foreach ($depName in $Script:BITSDependencies) {
         try {
@@ -384,7 +591,7 @@ function Repair-ServiceDependencies {
                     Set-ItemProperty -Path $regPath -Name 'Start' -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
                     Write-Log "$depName was disabled, set to Automatic" -Level SUCCESS
                 }
-                
+
                 if ($dep.Status -ne 'Running') {
                     Start-Service -Name $depName -ErrorAction SilentlyContinue
                     Start-Sleep -Milliseconds 500
@@ -393,7 +600,7 @@ function Repair-ServiceDependencies {
         }
         catch { }
     }
-    
+
     # Fix BITS service configuration
     $bitsRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\BITS"
     if (Test-Path $bitsRegPath) {
@@ -401,18 +608,18 @@ function Repair-ServiceDependencies {
             # Reset BITS to default configuration
             Set-ItemProperty -Path $bitsRegPath -Name 'Start' -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -Path $bitsRegPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            
+
             # Reset ImagePath if corrupted
             $defaultImagePath = '%SystemRoot%\System32\svchost.exe -k netsvcs -p'
             Set-ItemProperty -Path $bitsRegPath -Name 'ImagePath' -Value $defaultImagePath -Type ExpandString -Force -ErrorAction SilentlyContinue
-            
+
             Write-Log "BITS service configuration repaired" -Level SUCCESS
         }
         catch {
             Write-Log "Could not repair BITS configuration" -Level WARNING
         }
     }
-    
+
     # Fix Delivery Optimization service
     $dosvcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\dosvc"
     if (Test-Path $dosvcRegPath) {
@@ -431,12 +638,12 @@ function Repair-ServiceDependencies {
 }
 
 # ============================================================================
-# NEW: WINDOWS UPDATE POLICIES REPAIR
+# WINDOWS UPDATE POLICIES REPAIR
 # ============================================================================
 
 function Repair-UpdatePolicies {
     Write-Log "POLICIES - Removing Windows Update Restrictions" -Level SECTION
-    
+
     # Registry paths that can block Windows Update
     $policiesToRemove = @(
         @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess' },
@@ -449,7 +656,7 @@ function Repair-UpdatePolicies {
         @{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate' },
         @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess' }
     )
-    
+
     $removedCount = 0
     foreach ($policy in $policiesToRemove) {
         try {
@@ -464,14 +671,14 @@ function Repair-UpdatePolicies {
         }
         catch { }
     }
-    
+
     if ($removedCount -eq 0) {
         Write-Log "No blocking policies found" -Level SUCCESS
     }
     else {
         Write-Log "Removed $removedCount blocking policies" -Level SUCCESS
     }
-    
+
     # Check for WSUS redirection (common in enterprise/LTSC)
     $wsusPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
     if (Test-Path $wsusPath) {
@@ -489,29 +696,29 @@ function Repair-UpdatePolicies {
 
 function Get-WUDiagnostics {
     Write-Log "DIAGNOSTICS - Gathering System Information" -Level SECTION
-    
+
     # OS Information
     $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
     Write-Log "OS: $($os.Caption) ($($os.Version)) Build $($os.BuildNumber)"
     Write-Log "Architecture: $($os.OSArchitecture)"
     Write-Log "Install Date: $($os.InstallDate)"
     Write-Log "Last Boot: $($os.LastBootUpTime)"
-    
+
     # Check for LTSC/LTSB (different update behavior)
     if ($os.Caption -match 'LTSC|LTSB|IoT') {
         Write-Log "LTSC/IoT Edition detected - limited feature updates available" -Level WARNING
     }
-    
+
     # Disk Space
     $systemDrive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
     $freeGB = [math]::Round($systemDrive.FreeSpace / 1GB, 2)
     $totalGB = [math]::Round($systemDrive.Size / 1GB, 2)
     Write-Log "System Drive: $freeGB GB free of $totalGB GB"
-    
+
     if ($freeGB -lt 10) {
         Write-Log "Low disk space may cause Windows Update issues!" -Level WARNING
     }
-    
+
     # Service Status
     Write-Log ""
     Write-Log "Windows Update Service Status:"
@@ -521,7 +728,7 @@ function Get-WUDiagnostics {
             $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
             $startType = (Get-ItemProperty -Path $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
             $startTypeName = switch ($startType) { 0 { 'Boot' } 1 { 'System' } 2 { 'Automatic' } 3 { 'Manual' } 4 { 'Disabled' } default { 'Unknown' } }
-            
+
             if ($startType -eq 4) {
                 Write-Log "  $($svc.DisplayName): $($service.Status) (DISABLED!)" -Level ERROR
             }
@@ -530,10 +737,10 @@ function Get-WUDiagnostics {
             }
         }
         else {
-            Write-Log "  ${svc}: Not Found" -Level WARNING
+            Write-Log "  $($svc.Name): Not Found" -Level WARNING
         }
     }
-    
+
     # Check for pending reboot
     $pendingReboot = $false
     $rebootPaths = @(
@@ -541,14 +748,14 @@ function Get-WUDiagnostics {
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
         'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations'
     )
-    
+
     foreach ($path in $rebootPaths) {
         if (Test-Path $path) {
             $pendingReboot = $true
             break
         }
     }
-    
+
     Write-Log ""
     if ($pendingReboot) {
         Write-Log "Pending reboot detected - may need to restart before updates work" -Level WARNING
@@ -556,13 +763,13 @@ function Get-WUDiagnostics {
     else {
         Write-Log "No pending reboot detected" -Level SUCCESS
     }
-    
+
     # Check Windows Update folder sizes
     Write-Log ""
     Write-Log "Windows Update Folder Sizes:"
     foreach ($folder in $Script:WUFolders) {
         if (Test-Path $folder) {
-            $size = (Get-ChildItem -Path $folder -Recurse -Force -ErrorAction SilentlyContinue | 
+            $size = (Get-ChildItem -Path $folder -Recurse -Force -ErrorAction SilentlyContinue |
                      Measure-Object -Property Length -Sum).Sum
             $sizeMB = [math]::Round($size / 1MB, 2)
             Write-Log "  $folder : $sizeMB MB"
@@ -571,14 +778,14 @@ function Get-WUDiagnostics {
             Write-Log "  $folder : Not Found" -Level WARNING
         }
     }
-    
+
     # Check for stuck pending.xml
     $pendingXml = "$env:SystemRoot\WinSxS\pending.xml"
     if (Test-Path $pendingXml) {
         Write-Log ""
         Write-Log "pending.xml exists - may indicate stuck updates" -Level WARNING
     }
-    
+
     # Check hosts file for Microsoft blocks
     Write-Log ""
     Write-Log "Checking hosts file for Microsoft blocks..."
@@ -600,7 +807,7 @@ function Get-WUDiagnostics {
             Write-Log "No Microsoft blocks in hosts file" -Level SUCCESS
         }
     }
-    
+
     return @{
         OSVersion = $os.Version
         Build = $os.BuildNumber
@@ -612,10 +819,10 @@ function Get-WUDiagnostics {
 
 function Test-WindowsUpdateConnectivity {
     Write-Log "CONNECTIVITY - Testing Windows Update Servers" -Level SECTION
-    
+
     # Force TLS 1.2 for these tests
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    
+
     $endpoints = @(
         @{ Name = "Windows Update"; URL = "https://update.microsoft.com" },
         @{ Name = "Microsoft Update"; URL = "https://www.update.microsoft.com" },
@@ -623,10 +830,10 @@ function Test-WindowsUpdateConnectivity {
         @{ Name = "Windows Update Catalog"; URL = "https://catalog.update.microsoft.com" },
         @{ Name = "Delivery Optimization"; URL = "https://download.delivery.mp.microsoft.com" }
     )
-    
+
     $allSuccess = $true
     $failedCount = 0
-    
+
     foreach ($endpoint in $endpoints) {
         try {
             $response = Invoke-WebRequest -Uri $endpoint.URL -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
@@ -634,7 +841,7 @@ function Test-WindowsUpdateConnectivity {
         }
         catch {
             $errorMsg = $_.Exception.Message
-            
+
             # Provide specific guidance based on error
             if ($errorMsg -match '403') {
                 Write-Log "$($endpoint.Name): BLOCKED (403 Forbidden) - Check hosts file/firewall" -Level ERROR
@@ -648,17 +855,17 @@ function Test-WindowsUpdateConnectivity {
             else {
                 Write-Log "$($endpoint.Name): UNREACHABLE - $errorMsg" -Level ERROR
             }
-            
+
             $allSuccess = $false
             $failedCount++
         }
     }
-    
+
     if ($failedCount -gt 0) {
         Write-Log ""
         Write-Log "Connectivity issues detected! This script will attempt to fix them." -Level WARNING
     }
-    
+
     return $allSuccess
 }
 
@@ -668,9 +875,9 @@ function Test-WindowsUpdateConnectivity {
 
 function Stop-WUServices {
     Write-Log "SERVICES - Stopping Windows Update Services" -Level SECTION
-    
+
     $stopOrder = @('wuauserv', 'bits', 'dosvc', 'cryptsvc', 'msiserver')
-    
+
     foreach ($svcName in $stopOrder) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if ($svc) {
@@ -683,7 +890,7 @@ function Stop-WUServices {
                     while ((Get-Service -Name $svcName).Status -ne 'Stopped' -and $timer.Elapsed.TotalSeconds -lt $timeout) {
                         Start-Sleep -Milliseconds 500
                     }
-                    
+
                     if ((Get-Service -Name $svcName).Status -eq 'Stopped') {
                         Write-Log "$($svc.DisplayName) stopped" -Level SUCCESS
                     }
@@ -704,22 +911,22 @@ function Stop-WUServices {
 
 function Start-WUServices {
     Write-Log "SERVICES - Starting Windows Update Services" -Level SECTION
-    
+
     $startOrder = @('cryptsvc', 'bits', 'wuauserv', 'dosvc', 'msiserver')
-    
+
     foreach ($svcName in $startOrder) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if ($svc) {
             # Ensure service is not disabled
             $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName"
             $startType = (Get-ItemProperty -Path $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
-            
+
             if ($startType -eq 4) {
                 # Service is disabled, enable it first
                 Set-ItemProperty -Path $regPath -Name 'Start' -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
                 Write-Log "$svcName was disabled, now enabled" -Level SUCCESS
             }
-            
+
             if ($svc.Status -ne 'Running') {
                 Write-Log "Starting $($svc.DisplayName)..."
                 try {
@@ -728,7 +935,7 @@ function Start-WUServices {
                 }
                 catch {
                     Write-Log "Failed to start $($svc.DisplayName): $($_.Exception.Message)" -Level WARNING
-                    
+
                     # If BITS fails, try repairing it
                     if ($svcName -eq 'bits') {
                         Write-Log "Attempting BITS repair..." -Level INFO
@@ -752,11 +959,11 @@ function Start-WUServices {
 
 function Reset-WUServiceConfig {
     Write-Log "SERVICES - Resetting Service Configurations" -Level SECTION
-    
+
     foreach ($svc in $Script:WUServices) {
         try {
             $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
-            
+
             if (Test-Path $regPath) {
                 # Set correct start type
                 $startValue = switch ($svc.StartType) {
@@ -764,14 +971,14 @@ function Reset-WUServiceConfig {
                     'Manual' { 3 }
                     default { 3 }
                 }
-                
+
                 Set-ItemProperty -Path $regPath -Name 'Start' -Value $startValue -Type DWord -Force -ErrorAction SilentlyContinue
-                
+
                 # Set delayed start if needed
                 if ($svc.DelayedStart) {
                     Set-ItemProperty -Path $regPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
                 }
-                
+
                 Write-Log "$($svc.Name): StartType set to $($svc.StartType)" -Level SUCCESS
             }
         }
@@ -779,7 +986,7 @@ function Reset-WUServiceConfig {
             Write-Log "Failed to configure $($svc.Name): $($_.Exception.Message)" -Level WARNING
         }
     }
-    
+
     # Reset BITS jobs
     Write-Log "Clearing BITS transfer queue..."
     try {
@@ -793,15 +1000,15 @@ function Reset-WUServiceConfig {
 
 function Backup-WUFolders {
     Write-Log "BACKUP - Creating Backup of Windows Update Folders" -Level SECTION
-    
+
     if (-not (Test-Path $Script:Config.BackupPath)) {
         New-Item -Path $Script:Config.BackupPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
     }
-    
+
     foreach ($folder in $Script:WUFolders) {
         if (Test-Path $folder) {
             $folderName = Split-Path $folder -Leaf
-            
+
             Write-Log "Backing up $folderName..."
             try {
                 $backupName = "$folder.bak.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
@@ -817,7 +1024,7 @@ function Backup-WUFolders {
 
 function Clear-WUCache {
     Write-Log "CACHE - Clearing Windows Update Cache" -Level SECTION
-    
+
     foreach ($folder in $Script:WUFolders) {
         if (Test-Path $folder) {
             Write-Log "Clearing $folder..."
@@ -827,7 +1034,7 @@ function Clear-WUCache {
             }
             catch {
                 Write-Log "Could not fully clear $folder (files may be in use)" -Level WARNING
-                Get-ChildItem -Path $folder -Recurse -Force -ErrorAction SilentlyContinue | 
+                Get-ChildItem -Path $folder -Recurse -Force -ErrorAction SilentlyContinue |
                     ForEach-Object {
                         Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
                     }
@@ -838,14 +1045,14 @@ function Clear-WUCache {
             Write-Log "$folder recreated" -Level SUCCESS
         }
     }
-    
+
     # Clear download cache
     $downloadCache = "$env:SystemRoot\SoftwareDistribution\Download"
     if (Test-Path $downloadCache) {
         Write-Log "Clearing download cache..."
         Remove-Item -Path "$downloadCache\*" -Recurse -Force -ErrorAction SilentlyContinue
     }
-    
+
     # Clear pending.xml if exists
     $pendingXml = "$env:SystemRoot\WinSxS\pending.xml"
     if (Test-Path $pendingXml) {
@@ -864,10 +1071,10 @@ function Clear-WUCache {
 
 function Register-WUDlls {
     Write-Log "DLLS - Re-registering Windows Update DLLs" -Level SECTION
-    
+
     $registered = 0
     $failed = 0
-    
+
     foreach ($dll in $Script:WUDlls) {
         $dllPath = "$env:SystemRoot\System32\$dll"
         if (Test-Path $dllPath) {
@@ -885,25 +1092,25 @@ function Register-WUDlls {
             }
         }
     }
-    
+
     Write-Log "$registered DLLs registered, $failed not found (normal for some)" -Level SUCCESS
 }
 
 function Reset-WinsockCatalog {
     Write-Log "NETWORK - Resetting Network Components" -Level SECTION
-    
+
     Write-Log "Resetting Winsock catalog..."
     $result = netsh winsock reset 2>&1
     Write-Log "Winsock reset complete" -Level SUCCESS
-    
+
     Write-Log "Resetting TCP/IP stack..."
     $result = netsh int ip reset 2>&1
     Write-Log "TCP/IP reset complete" -Level SUCCESS
-    
+
     Write-Log "Flushing DNS cache..."
     $result = ipconfig /flushdns 2>&1
     Write-Log "DNS cache flushed" -Level SUCCESS
-    
+
     Write-Log "Resetting proxy settings..."
     $result = netsh winhttp reset proxy 2>&1
     Write-Log "Proxy settings reset" -Level SUCCESS
@@ -911,7 +1118,7 @@ function Reset-WinsockCatalog {
 
 function Reset-WURegistry {
     Write-Log "REGISTRY - Resetting Windows Update Registry Keys" -Level SECTION
-    
+
     $keysToRemove = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\PostRebootReporting',
@@ -919,7 +1126,7 @@ function Reset-WURegistry {
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress',
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending'
     )
-    
+
     foreach ($key in $keysToRemove) {
         if (Test-Path $key) {
             try {
@@ -931,39 +1138,39 @@ function Reset-WURegistry {
             }
         }
     }
-    
+
     # Ensure Windows Update registry settings are correct
     $wuRegPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate'
     if (-not (Test-Path $wuRegPath)) {
         New-Item -Path $wuRegPath -Force -ErrorAction SilentlyContinue | Out-Null
     }
-    
+
     $auPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update'
     if (-not (Test-Path $auPath)) {
         New-Item -Path $auPath -Force -ErrorAction SilentlyContinue | Out-Null
     }
-    
+
     Write-Log "Registry cleanup complete" -Level SUCCESS
 }
 
 function Reset-WindowsUpdateAgent {
     Write-Log "AGENT - Resetting Windows Update Agent" -Level SECTION
-    
+
     # Delete qmgr*.dat files
     Write-Log "Removing BITS data files..."
     $bitsLocations = @(
         "$env:ALLUSERSPROFILE\Application Data\Microsoft\Network\Downloader",
         "$env:ALLUSERSPROFILE\Microsoft\Network\Downloader"
     )
-    
+
     foreach ($loc in $bitsLocations) {
         if (Test-Path $loc) {
-            Get-ChildItem -Path $loc -Filter "qmgr*.dat" -ErrorAction SilentlyContinue | 
+            Get-ChildItem -Path $loc -Filter "qmgr*.dat" -ErrorAction SilentlyContinue |
                 ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
         }
     }
     Write-Log "BITS data files removed" -Level SUCCESS
-    
+
     Write-Log "Resetting Windows Update authorization..."
     $susClientId = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate'
     if (Test-Path $susClientId) {
@@ -975,7 +1182,7 @@ function Reset-WindowsUpdateAgent {
 
 function Update-GroupPolicy {
     Write-Log "POLICY - Refreshing Group Policy" -Level SECTION
-    
+
     Write-Log "Forcing Group Policy update..."
     $result = gpupdate /force 2>&1
     Write-Log "Group Policy refreshed" -Level SUCCESS
@@ -983,21 +1190,21 @@ function Update-GroupPolicy {
 
 function Invoke-DISM {
     Write-Log "DISM - Running System Image Repairs" -Level SECTION
-    
+
     Write-Log "Checking component store health..."
     $result = DISM /Online /Cleanup-Image /CheckHealth 2>&1
     Write-Log "Health check complete"
-    
+
     Write-Log "Scanning component store (this may take several minutes)..."
     $result = DISM /Online /Cleanup-Image /ScanHealth 2>&1
     $scanOutput = $result -join "`n"
-    
+
     if ($scanOutput -match "component store is repairable") {
         Write-Log "Component store corruption detected, repairing..." -Level WARNING
-        
+
         Write-Log "Running RestoreHealth (this may take 15-30 minutes)..."
         $result = DISM /Online /Cleanup-Image /RestoreHealth 2>&1
-        
+
         if ($LASTEXITCODE -eq 0) {
             Write-Log "Component store repaired successfully" -Level SUCCESS
         }
@@ -1011,7 +1218,7 @@ function Invoke-DISM {
     else {
         Write-Log "Scan completed"
     }
-    
+
     Write-Log "Cleaning up superseded components..."
     $result = DISM /Online /Cleanup-Image /StartComponentCleanup 2>&1
     Write-Log "Component cleanup complete" -Level SUCCESS
@@ -1019,12 +1226,12 @@ function Invoke-DISM {
 
 function Invoke-SFC {
     Write-Log "SFC - Running System File Checker" -Level SECTION
-    
+
     Write-Log "Scanning system files (this may take 10-15 minutes)..."
-    
+
     $sfcOutput = sfc /scannow 2>&1
     $sfcResult = $sfcOutput -join "`n"
-    
+
     if ($sfcResult -match "did not find any integrity violations") {
         Write-Log "No integrity violations found" -Level SUCCESS
     }
@@ -1038,7 +1245,7 @@ function Invoke-SFC {
     else {
         Write-Log "SFC scan completed"
     }
-    
+
     $cbsLog = "$env:SystemRoot\Logs\CBS\CBS.log"
     if (Test-Path $cbsLog) {
         Write-Log "Detailed results in: $cbsLog"
@@ -1047,7 +1254,7 @@ function Invoke-SFC {
 
 function Invoke-WindowsUpdateCheck {
     Write-Log "CHECK - Initiating Windows Update Check" -Level SECTION
-    
+
     Write-Log "Triggering Windows Update scan..."
     try {
         $result = Start-Process -FilePath "UsoClient.exe" -ArgumentList "StartScan" -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
@@ -1062,8 +1269,69 @@ function Invoke-WindowsUpdateCheck {
             Write-Log "Could not trigger update scan automatically" -Level WARNING
         }
     }
-    
+
     Write-Log "Open Windows Update settings to check for updates manually"
+}
+
+# ============================================================================
+# POST-REPAIR VERIFICATION (BEFORE/AFTER COMPARISON)
+# ============================================================================
+
+function Show-BeforeAfterComparison {
+    param(
+        [hashtable]$Before,
+        [hashtable]$After
+    )
+
+    Write-Log "POST-REPAIR VERIFICATION - Before/After Comparison" -Level SECTION
+
+    Write-Host ""
+    Write-Host "  +--------------------------------------------+----------------------------+----------------------------+" -ForegroundColor DarkGray
+    Write-Host "  | Component                                  | BEFORE                     | AFTER                      |" -ForegroundColor DarkGray
+    Write-Host "  +--------------------------------------------+----------------------------+----------------------------+" -ForegroundColor DarkGray
+
+    # Compare services
+    for ($i = 0; $i -lt $Before['Services'].Count; $i++) {
+        $bSvc = $Before['Services'][$i]
+        $aSvc = $After['Services'][$i]
+        $comp = $bSvc.Component.PadRight(42)
+        $bStat = $bSvc.Status.PadRight(26)
+        $aStat = $aSvc.Status.PadRight(26)
+        $bColor = if ($bSvc.Status -match 'Disabled') { 'Red' } elseif ($bSvc.Status -match 'Stopped') { 'Yellow' } else { 'Green' }
+        $aColor = if ($aSvc.Status -match 'Disabled') { 'Red' } elseif ($aSvc.Status -match 'Stopped') { 'Yellow' } else { 'Green' }
+
+        Write-Host "  | $comp | " -ForegroundColor DarkGray -NoNewline
+        Write-Host "$bStat" -ForegroundColor $bColor -NoNewline
+        Write-Host " | " -ForegroundColor DarkGray -NoNewline
+        Write-Host "$aStat" -ForegroundColor $aColor -NoNewline
+        Write-Host " |" -ForegroundColor DarkGray
+    }
+
+    # Compare info rows
+    $compareKeys = @(
+        @{ Key = 'SoftwareDistribution'; Label = 'SoftwareDistribution' },
+        @{ Key = 'Catroot2'; Label = 'catroot2' },
+        @{ Key = 'DISMHealth'; Label = 'DISM Health' },
+        @{ Key = 'PendingReboot'; Label = 'Pending Reboot' },
+        @{ Key = 'LastSuccessfulUpdate'; Label = 'Last Successful Update' }
+    )
+
+    foreach ($item in $compareKeys) {
+        $lbl = $item.Label.PadRight(42)
+        $bVal = ([string]$Before[$item.Key]).PadRight(26)
+        $aVal = ([string]$After[$item.Key]).PadRight(26)
+        $changed = ($Before[$item.Key] -ne $After[$item.Key])
+        $aColor = if ($changed) { 'Green' } else { 'Cyan' }
+
+        Write-Host "  | $lbl | " -ForegroundColor DarkGray -NoNewline
+        Write-Host "$bVal" -ForegroundColor Cyan -NoNewline
+        Write-Host " | " -ForegroundColor DarkGray -NoNewline
+        Write-Host "$aVal" -ForegroundColor $aColor -NoNewline
+        Write-Host " |" -ForegroundColor DarkGray
+    }
+
+    Write-Host "  +--------------------------------------------+----------------------------+----------------------------+" -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 # ============================================================================
@@ -1075,113 +1343,197 @@ function Start-WURepair {
         [switch]$SkipDISM,
         [switch]$SkipSFC,
         [switch]$SkipBackup,
-        [switch]$QuickMode
+        [switch]$QuickMode,
+        [switch]$RepairServices,
+        [switch]$RepairDLLs,
+        [switch]$RepairStore,
+        [switch]$RepairDISM,
+        [switch]$RepairSFC,
+        [switch]$RepairNetwork,
+        [switch]$RepairAll
     )
-    
+
     Show-Banner
-    
+
     if (-not (Test-AdminRights)) {
         Write-Log "This script requires Administrator privileges!" -Level ERROR
         Write-Log "Please right-click and 'Run as Administrator'"
         return
     }
-    
+
+    # Initialize event log source
+    Initialize-EventSource
+
+    # Determine selective mode: if no specific -Repair* switch given, run all
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork)
+    if ($RepairAll -or (-not $selectiveMode)) {
+        # Full repair mode
+        $RepairServices = $true
+        $RepairDLLs     = $true
+        $RepairStore    = $true
+        $RepairDISM     = $true
+        $RepairSFC      = $true
+        $RepairNetwork  = $true
+        $selectiveMode  = $false
+    }
+
+    # Override DISM/SFC if skip flags are set
+    if ($SkipDISM -or $QuickMode) { $RepairDISM = $false }
+    if ($SkipSFC -or $QuickMode) { $RepairSFC = $false }
+
     $startTime = Get-Date
-    Write-Log "WURepair started at $startTime"
+    Write-Log "WURepair v$($Script:Config.Version) started at $startTime"
     Write-Log "Log file: $($Script:Config.LogPath)"
-    
-    # Create restore point
-    Write-Log ""
-    Write-Log "Creating system restore point..."
-    try {
-        Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
-        Checkpoint-Computer -Description "WURepair - Before Windows Update Reset" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
-        Write-Log "Restore point created" -Level SUCCESS
+
+    Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $(if ($selectiveMode) { 'Selective' } else { 'Full' })" -EventId 1000
+
+    # ── Diagnostic Pre-Check Report ──
+    $preReport = Get-DiagnosticReport
+
+    # Create restore point (full mode only)
+    if (-not $selectiveMode) {
+        Write-Log ""
+        Write-Log "Creating system restore point..."
+        try {
+            Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
+            Checkpoint-Computer -Description "WURepair - Before Windows Update Reset" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+            Write-Log "Restore point created" -Level SUCCESS
+        }
+        catch {
+            Write-Log "Could not create restore point (may be disabled)" -Level WARNING
+        }
     }
-    catch {
-        Write-Log "Could not create restore point (may be disabled)" -Level WARNING
-    }
-    
-    # Run diagnostics
+
+    # Run existing diagnostics
     $diag = Get-WUDiagnostics
-    
+
     # Test connectivity
     $connectivity = Test-WindowsUpdateConnectivity
-    
+
     # Confirm before proceeding
     Write-Host ""
-    Write-Host "Ready to perform Windows Update reset." -ForegroundColor Yellow
-    Write-Host "This will:" -ForegroundColor Yellow
-    Write-Host "  - Clean hosts file of Microsoft blocks" -ForegroundColor White
-    Write-Host "  - Repair SSL/TLS configuration" -ForegroundColor White
-    Write-Host "  - Fix firewall rules for Windows Update" -ForegroundColor White
-    Write-Host "  - Repair service dependencies (BITS, Delivery Optimization)" -ForegroundColor White
-    Write-Host "  - Remove Windows Update blocking policies" -ForegroundColor White
-    Write-Host "  - Stop Windows Update services" -ForegroundColor White
-    Write-Host "  - Clear update cache and temporary files" -ForegroundColor White
-    Write-Host "  - Re-register system DLLs" -ForegroundColor White
-    Write-Host "  - Reset network components" -ForegroundColor White
-    Write-Host "  - Clean up registry entries" -ForegroundColor White
-    if (-not $SkipDISM -and -not $QuickMode) {
-        Write-Host "  - Run DISM repairs (can take 15-30 minutes)" -ForegroundColor White
-    }
-    if (-not $SkipSFC -and -not $QuickMode) {
-        Write-Host "  - Run System File Checker" -ForegroundColor White
+    Write-Host "Ready to perform Windows Update repair." -ForegroundColor Yellow
+    if ($selectiveMode) {
+        Write-Host "Selective mode - only running chosen phases:" -ForegroundColor Yellow
+        if ($RepairServices) { Write-Host "  - Repair Services" -ForegroundColor White }
+        if ($RepairDLLs)     { Write-Host "  - Re-register DLLs" -ForegroundColor White }
+        if ($RepairStore)    { Write-Host "  - Reset data stores (SoftwareDistribution/catroot2)" -ForegroundColor White }
+        if ($RepairDISM)     { Write-Host "  - DISM component store repair" -ForegroundColor White }
+        if ($RepairSFC)      { Write-Host "  - System File Checker" -ForegroundColor White }
+        if ($RepairNetwork)  { Write-Host "  - Network stack reset" -ForegroundColor White }
+    } else {
+        Write-Host "This will:" -ForegroundColor Yellow
+        Write-Host "  - Clean hosts file of Microsoft blocks" -ForegroundColor White
+        Write-Host "  - Repair SSL/TLS configuration" -ForegroundColor White
+        Write-Host "  - Fix firewall rules for Windows Update" -ForegroundColor White
+        Write-Host "  - Repair service dependencies (BITS, Delivery Optimization)" -ForegroundColor White
+        Write-Host "  - Remove Windows Update blocking policies" -ForegroundColor White
+        Write-Host "  - Stop Windows Update services" -ForegroundColor White
+        Write-Host "  - Clear update cache and temporary files" -ForegroundColor White
+        Write-Host "  - Re-register system DLLs" -ForegroundColor White
+        Write-Host "  - Reset network components" -ForegroundColor White
+        Write-Host "  - Clean up registry entries" -ForegroundColor White
+        if ($RepairDISM) {
+            Write-Host "  - Run DISM repairs (can take 15-30 minutes)" -ForegroundColor White
+        }
+        if ($RepairSFC) {
+            Write-Host "  - Run System File Checker" -ForegroundColor White
+        }
     }
     Write-Host ""
-    
+
     $confirm = Read-Host "Continue? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Log "Operation cancelled by user" -Level WARNING
         return
     }
-    
-    # === NEW REPAIR STEPS ===
-    Repair-HostsFile
-    Repair-TLSConfiguration
-    Repair-FirewallRules
-    Repair-ServiceDependencies
-    Repair-UpdatePolicies
-    
-    # === EXISTING REPAIR STEPS ===
-    Stop-WUServices
-    
-    if (-not $SkipBackup -and $Script:Config.CreateBackup) {
-        Backup-WUFolders
+
+    # ── Build phase list for progress tracking ──
+    $phases = @()
+    if (-not $selectiveMode) {
+        $phases += @{ Name = 'Repair Hosts File';          Action = { Repair-HostsFile } }
+        $phases += @{ Name = 'Repair SSL/TLS';             Action = { Repair-TLSConfiguration } }
+        $phases += @{ Name = 'Repair Firewall Rules';      Action = { Repair-FirewallRules } }
+        $phases += @{ Name = 'Repair Service Dependencies'; Action = { Repair-ServiceDependencies } }
+        $phases += @{ Name = 'Remove Blocking Policies';   Action = { Repair-UpdatePolicies } }
     }
-    
-    Clear-WUCache
-    Reset-WUServiceConfig
-    Register-WUDlls
-    Reset-WinsockCatalog
-    Reset-WURegistry
-    Reset-WindowsUpdateAgent
-    
-    if (-not $SkipDISM -and -not $QuickMode) {
-        Invoke-DISM
+    if ($RepairServices) {
+        $phases += @{ Name = 'Stop WU Services';           Action = { Stop-WUServices } }
+        $phases += @{ Name = 'Reset Service Config';       Action = { Reset-WUServiceConfig } }
     }
-    
-    if (-not $SkipSFC -and -not $QuickMode) {
-        Invoke-SFC
+    if ($RepairStore) {
+        if (-not $SkipBackup -and $Script:Config.CreateBackup) {
+            $phases += @{ Name = 'Backup WU Folders';      Action = { Backup-WUFolders } }
+        }
+        $phases += @{ Name = 'Clear WU Cache';             Action = { Clear-WUCache } }
+        $phases += @{ Name = 'Reset WU Registry';          Action = { Reset-WURegistry } }
+        $phases += @{ Name = 'Reset WU Agent';             Action = { Reset-WindowsUpdateAgent } }
     }
-    
-    Start-WUServices
-    Update-GroupPolicy
-    
-    # Test connectivity again
+    if ($RepairDLLs) {
+        $phases += @{ Name = 'Re-register DLLs';           Action = { Register-WUDlls } }
+    }
+    if ($RepairNetwork) {
+        $phases += @{ Name = 'Reset Network Stack';        Action = { Reset-WinsockCatalog } }
+    }
+    if ($RepairDISM) {
+        $phases += @{ Name = 'DISM Repairs';               Action = { Invoke-DISM } }
+    }
+    if ($RepairSFC) {
+        $phases += @{ Name = 'System File Checker';        Action = { Invoke-SFC } }
+    }
+    if ($RepairServices) {
+        $phases += @{ Name = 'Start WU Services';          Action = { Start-WUServices } }
+    }
+    if (-not $selectiveMode) {
+        $phases += @{ Name = 'Refresh Group Policy';       Action = { Update-GroupPolicy } }
+    }
+
+    $totalPhases = $phases.Count
+    $currentPhase = 0
+
+    foreach ($phase in $phases) {
+        $currentPhase++
+        $pct = [int](($currentPhase / $totalPhases) * 100)
+        Write-Progress -Activity "WURepair v$($Script:Config.Version)" `
+            -Status "Phase $currentPhase of $totalPhases : $($phase.Name)" `
+            -PercentComplete $pct
+        Write-Log "--- Phase $currentPhase of $totalPhases : $($phase.Name) ---"
+        & $phase.Action
+    }
+
+    Write-Progress -Activity "WURepair v$($Script:Config.Version)" -Completed
+
+    # ── Post-repair connectivity test ──
     Write-Log "POST-REPAIR CONNECTIVITY TEST" -Level SECTION
     $postConnectivity = Test-WindowsUpdateConnectivity
-    
+
+    # ── Post-repair verification: re-run diagnostic and compare ──
+    $postReport = Get-DiagnosticReport
+    Show-BeforeAfterComparison -Before $preReport -After $postReport
+
+    # Trigger Windows Update check
     Invoke-WindowsUpdateCheck
-    
-    # Summary
+
+    # ── Event log summary ──
     $endTime = Get-Date
     $duration = $endTime - $startTime
-    
+    $durationMin = [math]::Round($duration.TotalMinutes, 1)
+
+    $summaryLines = @(
+        "WURepair v$($Script:Config.Version) completed."
+        "Duration: $durationMin minutes"
+        "Mode: $(if ($selectiveMode) { 'Selective' } else { 'Full' })"
+        "Phases executed: $totalPhases"
+        "Post-repair connectivity: $(if ($postConnectivity) { 'All endpoints reachable' } else { 'Some endpoints unreachable' })"
+    )
+    $summaryText = $summaryLines -join "`r`n"
+    Write-RepairEventLog -Message $summaryText -EventId 1001
+
+    # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
-    Write-Log "Duration: $([math]::Round($duration.TotalMinutes, 1)) minutes"
+    Write-Log "Duration: $durationMin minutes"
     Write-Log "Log saved to: $($Script:Config.LogPath)"
-    
+
     Write-Host ""
     Write-Host "====================================================================" -ForegroundColor Green
     Write-Host "                      REPAIR COMPLETE                               " -ForegroundColor Green
@@ -1190,7 +1542,7 @@ function Start-WURepair {
     Write-Host "  A system RESTART is REQUIRED to complete all repairs." -ForegroundColor Yellow
     Write-Host "  After restart, check for Windows Updates in Settings." -ForegroundColor White
     Write-Host ""
-    
+
     if (-not $postConnectivity) {
         Write-Host "  NOTE: Connectivity issues may persist. After restart:" -ForegroundColor Yellow
         Write-Host "  - Check if third-party antivirus is blocking connections" -ForegroundColor White
@@ -1198,17 +1550,17 @@ function Start-WURepair {
         Write-Host "  - Check corporate proxy/firewall settings" -ForegroundColor White
         Write-Host ""
     }
-    
+
     if ($diag.IsLTSC) {
         Write-Host "  LTSC EDITION NOTE:" -ForegroundColor Cyan
         Write-Host "  Your Windows edition only receives security updates." -ForegroundColor White
         Write-Host "  Feature updates are not available for LTSC/IoT editions." -ForegroundColor White
         Write-Host ""
     }
-    
+
     Write-Host "====================================================================" -ForegroundColor Green
     Write-Host ""
-    
+
     $restart = Read-Host "Restart now? (Y/N)"
     if ($restart -match '^[Yy]') {
         Write-Log "Initiating restart..."
@@ -1226,10 +1578,17 @@ if ($args -contains '-SkipDISM') { $params['SkipDISM'] = $true }
 if ($args -contains '-SkipSFC') { $params['SkipSFC'] = $true }
 if ($args -contains '-SkipBackup') { $params['SkipBackup'] = $true }
 if ($args -contains '-QuickMode' -or $args -contains '-Quick') { $params['QuickMode'] = $true }
+if ($args -contains '-RepairServices') { $params['RepairServices'] = $true }
+if ($args -contains '-RepairDLLs') { $params['RepairDLLs'] = $true }
+if ($args -contains '-RepairStore') { $params['RepairStore'] = $true }
+if ($args -contains '-RepairDISM') { $params['RepairDISM'] = $true }
+if ($args -contains '-RepairSFC') { $params['RepairSFC'] = $true }
+if ($args -contains '-RepairNetwork') { $params['RepairNetwork'] = $true }
+if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
     Write-Host ""
-    Write-Host "WURepair - Windows Update Repair Tool v2.0"
+    Write-Host "WURepair - Windows Update Repair Tool v$($Script:Config.Version)"
     Write-Host ""
     Write-Host "USAGE:"
     Write-Host "    .\WURepair.ps1 [options]"
@@ -1242,19 +1601,28 @@ if ($args -contains '-Help' -or $args -contains '-?') {
     Write-Host "    -SkipBackup     Skip backup of Windows Update folders"
     Write-Host "    -Help           Show this help message"
     Write-Host ""
-    Write-Host "EXAMPLES:"
-    Write-Host "    .\WURepair.ps1                    Full repair (recommended)"
-    Write-Host "    .\WURepair.ps1 -Quick             Quick repair without DISM/SFC"
-    Write-Host "    .\WURepair.ps1 -SkipDISM          Skip only DISM repair"
+    Write-Host "SELECTIVE REPAIR (run individual phases):"
+    Write-Host "    -RepairServices Reset/restart Windows Update services"
+    Write-Host "    -RepairDLLs     Re-register Windows Update DLLs"
+    Write-Host "    -RepairStore    Rename SoftwareDistribution/catroot2"
+    Write-Host "    -RepairDISM     Run DISM component store repair only"
+    Write-Host "    -RepairSFC      Run System File Checker only"
+    Write-Host "    -RepairNetwork  Reset network stack only"
+    Write-Host "    -RepairAll      Run all phases (default when no switch given)"
     Write-Host ""
-    Write-Host "NEW IN v2.0:"
-    Write-Host "    - Hosts file cleanup (removes Microsoft domain blocks)"
-    Write-Host "    - SSL/TLS configuration repair"
-    Write-Host "    - Firewall rules repair for Windows Update"
-    Write-Host "    - Service dependency repair (fixes BITS/Delivery Optimization)"
-    Write-Host "    - Windows Update policy removal"
-    Write-Host "    - Post-repair connectivity test"
-    Write-Host "    - LTSC/IoT edition detection"
+    Write-Host "EXAMPLES:"
+    Write-Host "    .\WURepair.ps1                      Full repair (recommended)"
+    Write-Host "    .\WURepair.ps1 -Quick               Quick repair without DISM/SFC"
+    Write-Host "    .\WURepair.ps1 -RepairServices      Only reset WU services"
+    Write-Host "    .\WURepair.ps1 -RepairStore -RepairDLLs  Reset stores + re-register DLLs"
+    Write-Host "    .\WURepair.ps1 -SkipDISM            Skip only DISM repair"
+    Write-Host ""
+    Write-Host "NEW IN v2.1.0:"
+    Write-Host "    - Diagnostic pre-check report with formatted status table"
+    Write-Host "    - Selective repair via -Repair* switches"
+    Write-Host "    - Progress tracking (Phase X of Y with percentage)"
+    Write-Host "    - Event log integration (Application log, Source 'WURepair')"
+    Write-Host "    - Post-repair before/after comparison table"
     Write-Host ""
     exit
 }
