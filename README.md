@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.0.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.1.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -48,11 +48,14 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **DISM Integration**: Repairs component store corruption
 - **SFC Integration**: Scans and repairs system file integrity
 
-### 📊 Diagnostics
-- **Pre-repair Analysis**: Full system diagnostic before making changes
+### 📊 Diagnostics & Verification
+- **Diagnostic Pre-Check Report**: Formatted status table showing service states, folder sizes, DISM health, pending reboot status, last successful update date, and last 5 Windows Update errors from event log
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
-- **Post-repair Verification**: Confirms fixes were successful
+- **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
+- **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
+- **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
+- **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`
 
 ## Screenshots
 
@@ -64,7 +67,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.0
+    Windows Update Repair Tool v2.1.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -127,6 +130,22 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipBackup` | Skip backup of Windows Update folders |
 | `-Help` | Display help information |
 
+### Selective Repair Switches
+
+Run individual repair phases instead of the full pipeline:
+
+| Switch | Description |
+|--------|-------------|
+| `-RepairServices` | Only reset/restart Windows Update services |
+| `-RepairDLLs` | Only re-register Windows Update DLLs |
+| `-RepairStore` | Only rename SoftwareDistribution/catroot2 |
+| `-RepairDISM` | Only run DISM component store repair |
+| `-RepairSFC` | Only run System File Checker |
+| `-RepairNetwork` | Only reset network stack |
+| `-RepairAll` | Run all phases (default when no switch given) |
+
+Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
+
 ### Examples
 
 ```powershell
@@ -141,6 +160,12 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 
 # Skip backup (if low on disk space)
 .\WURepair.ps1 -SkipBackup
+
+# Only reset services
+.\WURepair.ps1 -RepairServices
+
+# Reset data stores + re-register DLLs
+.\WURepair.ps1 -RepairStore -RepairDLLs
 ```
 
 ## What Gets Fixed
@@ -230,26 +255,29 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        WURepair Flow                            │
+│                      WURepair v2.1.0 Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. Create System Restore Point                                 │
-│  2. Run Diagnostics (OS, services, disk, connectivity)         │
-│  3. Repair Hosts File (remove Microsoft blocks)                 │
-│  4. Repair SSL/TLS (enable TLS 1.2, strong crypto)             │
-│  5. Repair Firewall Rules (allow update traffic)               │
-│  6. Repair Service Dependencies (BITS, DO)                      │
-│  7. Remove Blocking Policies (registry cleanup)                 │
-│  8. Stop Update Services                                        │
-│  9. Backup & Clear Caches (SoftwareDistribution, catroot2)     │
-│ 10. Re-register DLLs (35+ Windows Update DLLs)                 │
-│ 11. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
-│ 12. Reset Windows Update Agent                                  │
-│ 13. Run DISM (component store repair)                          │
-│ 14. Run SFC (system file check)                                │
-│ 15. Start Update Services                                       │
-│ 16. Refresh Group Policy                                        │
-│ 17. Post-Repair Connectivity Test                               │
-│ 18. Trigger Update Scan                                         │
+│  1. Diagnostic Pre-Check Report (status table)                  │
+│  2. Create System Restore Point                                 │
+│  3. Run Diagnostics (OS, services, disk, connectivity)         │
+│  4. Repair Hosts File (remove Microsoft blocks)                 │
+│  5. Repair SSL/TLS (enable TLS 1.2, strong crypto)             │
+│  6. Repair Firewall Rules (allow update traffic)               │
+│  7. Repair Service Dependencies (BITS, DO)                      │
+│  8. Remove Blocking Policies (registry cleanup)                 │
+│  9. Stop Update Services                                        │
+│ 10. Backup & Clear Caches (SoftwareDistribution, catroot2)     │
+│ 11. Re-register DLLs (35+ Windows Update DLLs)                 │
+│ 12. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
+│ 13. Reset Windows Update Agent                                  │
+│ 14. Run DISM (component store repair)                          │
+│ 15. Run SFC (system file check)                                │
+│ 16. Start Update Services                                       │
+│ 17. Refresh Group Policy                                        │
+│ 18. Post-Repair Connectivity Test                               │
+│ 19. Post-Repair Verification (before/after comparison)          │
+│ 20. Trigger Update Scan                                         │
+│ 21. Write Event Log Summary                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -271,6 +299,14 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.1.0
+- Diagnostic pre-check report with formatted status table (services, folders, DISM health, pending reboot, last update, recent errors)
+- Selective repair via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork` switches
+- Progress tracking with `Write-Progress` (Phase X of Y with percentage)
+- Event log integration: writes start/completion summary to Application log under source "WURepair"
+- Post-repair before/after comparison table
+- Triggers Windows Update check after all repairs
 
 ### v2.0.0
 - Added hosts file cleanup for Microsoft domains
