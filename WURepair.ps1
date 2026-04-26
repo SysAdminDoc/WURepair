@@ -31,6 +31,17 @@ $Script:Config = @{
     FullReset      = $true
     Version        = '2.1.0'
     EventSource    = 'WURepair'
+    Ui             = @{
+        AccentColor   = 'Cyan'
+        TitleColor    = 'White'
+        MutedColor    = 'DarkGray'
+        InfoColor     = 'Gray'
+        SuccessColor  = 'Green'
+        WarningColor  = 'Yellow'
+        ErrorColor    = 'Red'
+        SectionColor  = 'Magenta'
+        EmphasisColor = 'DarkCyan'
+    }
 }
 
 # Windows Update related services - with correct start types
@@ -101,6 +112,246 @@ $Script:MicrosoftDomains = @(
 # HELPER FUNCTIONS
 # ============================================================================
 
+function Get-UiWidth {
+    try {
+        $width = [Console]::WindowWidth
+    }
+    catch {
+        $width = 100
+    }
+
+    if ($width -lt 84) { return 84 }
+    if ($width -gt 118) { return 118 }
+    return $width
+}
+
+function Get-UiColor {
+    param(
+        [ValidateSet('Accent', 'Title', 'Muted', 'Info', 'Success', 'Warning', 'Error', 'Section', 'Emphasis')]
+        [string]$Tone = 'Info'
+    )
+
+    switch ($Tone) {
+        'Accent' { return $Script:Config.Ui.AccentColor }
+        'Title' { return $Script:Config.Ui.TitleColor }
+        'Muted' { return $Script:Config.Ui.MutedColor }
+        'Success' { return $Script:Config.Ui.SuccessColor }
+        'Warning' { return $Script:Config.Ui.WarningColor }
+        'Error' { return $Script:Config.Ui.ErrorColor }
+        'Section' { return $Script:Config.Ui.SectionColor }
+        'Emphasis' { return $Script:Config.Ui.EmphasisColor }
+        default { return $Script:Config.Ui.InfoColor }
+    }
+}
+
+function Format-UiCell {
+    param(
+        [AllowNull()][string]$Text,
+        [int]$Width
+    )
+
+    if ($Width -lt 1) {
+        return ''
+    }
+
+    $safeText = if ($null -eq $Text) { '' } else { [string]$Text }
+    $safeText = $safeText -replace '\s+', ' '
+
+    if ($safeText.Length -gt $Width) {
+        if ($Width -le 2) {
+            return $safeText.Substring(0, $Width)
+        }
+        return $safeText.Substring(0, $Width - 1) + '...'
+    }
+
+    return $safeText.PadRight($Width)
+}
+
+function Get-StatusTone {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return 'Info'
+    }
+
+    if ($Value -match 'Disabled|Not Found|BLOCKED|UNREACHABLE|DNS FAILURE|SSL/TLS ERROR|Corrupted|Unable|Failed') {
+        return 'Error'
+    }
+
+    if ($Value -match 'Stopped|Repairable|Pending|Required|Unknown|Skipped|Limited|Caution|Warning|Yes|block\(s\) found|blocked') {
+        return 'Warning'
+    }
+
+    if ($Value -match 'Reachable|Healthy|Running|Enabled|No recent|No pending|No Microsoft blocks|^No$|Ready|Available|Created|Saved|Complete|Successful|Clean|Not present') {
+        return 'Success'
+    }
+
+    return 'Info'
+}
+
+function Write-UiRule {
+    param(
+        [string]$Tone = 'Muted',
+        [string]$Character = '─',
+        [int]$Indent = 2,
+        [int]$Width = 0
+    )
+
+    if ($Width -le 0) {
+        $Width = [Math]::Min(80, (Get-UiWidth) - ($Indent + 2))
+    }
+
+    Write-Host ((' ' * $Indent) + ($Character * $Width)) -ForegroundColor (Get-UiColor $Tone)
+}
+
+function Write-UiHeader {
+    param(
+        [string]$Title,
+        [string]$Subtitle = '',
+        [string]$Tone = 'Section'
+    )
+
+    Write-Host ''
+    Write-UiRule -Tone $Tone -Character '═'
+    Write-Host ("  {0}" -f $Title) -ForegroundColor (Get-UiColor 'Title')
+    if ($Subtitle) {
+        Write-Host ("  {0}" -f $Subtitle) -ForegroundColor (Get-UiColor 'Info')
+    }
+    Write-UiRule -Tone $Tone
+}
+
+function Write-UiSubheading {
+    param([string]$Title)
+
+    Write-Host ''
+    Write-Host ("  {0}" -f $Title) -ForegroundColor (Get-UiColor 'Title')
+    Write-UiRule -Tone 'Muted' -Width ([Math]::Min(36, [Math]::Max(16, $Title.Length + 6)))
+}
+
+function Write-UiMetric {
+    param(
+        [string]$Label,
+        [string]$Value,
+        [string]$Tone = 'Info',
+        [int]$LabelWidth = 28
+    )
+
+    $safeWidth = [Math]::Max(16, $LabelWidth)
+    Write-Host ("  {0}" -f (Format-UiCell -Text $Label -Width $safeWidth)) -ForegroundColor (Get-UiColor 'Muted') -NoNewline
+    Write-Host '  ' -NoNewline
+    Write-Host $Value -ForegroundColor (Get-UiColor $Tone)
+}
+
+function Write-UiComparisonLine {
+    param(
+        [string]$Label,
+        [string]$Before,
+        [string]$After,
+        [string]$Tone = 'Info',
+        [int]$LabelWidth = 28,
+        [int]$BeforeWidth = 26
+    )
+
+    Write-Host ("  {0}" -f (Format-UiCell -Text $Label -Width $LabelWidth)) -ForegroundColor (Get-UiColor 'Muted') -NoNewline
+    Write-Host '  ' -NoNewline
+    Write-Host (Format-UiCell -Text $Before -Width $BeforeWidth) -ForegroundColor (Get-UiColor 'Info') -NoNewline
+    Write-Host '  ->  ' -ForegroundColor (Get-UiColor 'Muted') -NoNewline
+    Write-Host $After -ForegroundColor (Get-UiColor $Tone)
+}
+
+function Write-UiList {
+    param(
+        [string]$Title,
+        [string[]]$Items,
+        [string]$Tone = 'Info'
+    )
+
+    if ($Title) {
+        Write-UiSubheading -Title $Title
+    }
+
+    foreach ($item in $Items) {
+        if (-not [string]::IsNullOrWhiteSpace($item)) {
+            Write-Host ("  • {0}" -f $item) -ForegroundColor (Get-UiColor $Tone)
+        }
+    }
+}
+
+function Write-UiCallout {
+    param(
+        [string]$Title,
+        [string[]]$Lines,
+        [string]$Tone = 'Info'
+    )
+
+    Write-Host ''
+    Write-Host ("  [{0}] {1}" -f $Tone.ToUpper(), $Title) -ForegroundColor (Get-UiColor $Tone)
+    foreach ($line in $Lines) {
+        Write-Host ("    {0}" -f $line) -ForegroundColor (Get-UiColor 'Info')
+    }
+}
+
+function Read-Confirmation {
+    param(
+        [string]$Prompt,
+        [switch]$DefaultYes
+    )
+
+    $suffix = if ($DefaultYes) { '[Y/n]' } else { '[y/N]' }
+
+    while ($true) {
+        $response = Read-Host "$Prompt $suffix"
+        if ($null -eq $response) {
+            $response = ''
+        }
+        $response = $response.Trim()
+
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return [bool]$DefaultYes
+        }
+
+        switch -Regex ($response) {
+            '^(y|yes)$' { return $true }
+            '^(n|no)$' { return $false }
+            default {
+                Write-Log "Please enter Y or N." -Level WARNING
+            }
+        }
+    }
+}
+
+function Get-EstimatedRepairDuration {
+    param(
+        [bool]$SelectiveMode,
+        [bool]$RepairDISM,
+        [bool]$RepairSFC,
+        [bool]$RepairNetwork,
+        [bool]$RepairStore
+    )
+
+    $minMinutes = if ($SelectiveMode) { 4 } else { 10 }
+    $maxMinutes = if ($SelectiveMode) { 12 } else { 22 }
+
+    if ($RepairStore) {
+        $minMinutes += 2
+        $maxMinutes += 5
+    }
+    if ($RepairNetwork) {
+        $minMinutes += 1
+        $maxMinutes += 3
+    }
+    if ($RepairDISM) {
+        $minMinutes += 15
+        $maxMinutes += 30
+    }
+    if ($RepairSFC) {
+        $minMinutes += 8
+        $maxMinutes += 15
+    }
+
+    return "$minMinutes-$maxMinutes minutes"
+}
+
 function Write-Log {
     param(
         [string]$Message,
@@ -111,32 +362,26 @@ function Write-Log {
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $logMessage = "[$timestamp] [$Level] $Message"
 
-    $colors = @{
-        'INFO'    = 'Cyan'
-        'SUCCESS' = 'Green'
-        'WARNING' = 'Yellow'
-        'ERROR'   = 'Red'
-        'SECTION' = 'Magenta'
-    }
-
     switch ($Level) {
         'SECTION' {
-            Write-Host ""
-            Write-Host ("=" * 70) -ForegroundColor $colors[$Level]
-            Write-Host "  $Message" -ForegroundColor $colors[$Level]
-            Write-Host ("=" * 70) -ForegroundColor $colors[$Level]
+            Write-UiHeader -Title $Message -Tone 'Section'
         }
         'SUCCESS' {
-            Write-Host "[+] $Message" -ForegroundColor $colors[$Level]
+            Write-Host ("  [OK] {0}" -f $Message) -ForegroundColor (Get-UiColor 'Success')
         }
         'WARNING' {
-            Write-Host "[!] $Message" -ForegroundColor $colors[$Level]
+            Write-Host ("  [!]  {0}" -f $Message) -ForegroundColor (Get-UiColor 'Warning')
         }
         'ERROR' {
-            Write-Host "[X] $Message" -ForegroundColor $colors[$Level]
+            Write-Host ("  [X]  {0}" -f $Message) -ForegroundColor (Get-UiColor 'Error')
         }
         default {
-            Write-Host "    $Message" -ForegroundColor $colors[$Level]
+            if ([string]::IsNullOrWhiteSpace($Message)) {
+                Write-Host ''
+            }
+            else {
+                Write-Host ("  • {0}" -f $Message) -ForegroundColor (Get-UiColor 'Info')
+            }
         }
     }
 
@@ -145,14 +390,12 @@ function Write-Log {
 
 function Show-Banner {
     Clear-Host
-    $banner = @"
-
-    WURepair v$($Script:Config.Version)
-    Windows Update Repair Tool
-    ─────────────────────────────────
-
-"@
-    Write-Host $banner -ForegroundColor Cyan
+    Write-Host ''
+    Write-UiRule -Tone 'Emphasis' -Character '═'
+    Write-Host ("  WURepair  v{0}" -f $Script:Config.Version) -ForegroundColor (Get-UiColor 'Accent')
+    Write-Host '  Repair Windows Update with guided diagnostics, safer defaults, and clearer next steps.' -ForegroundColor (Get-UiColor 'Title')
+    Write-Host '  Best used when updates are blocked by debloaters, policy drift, service damage, or cache corruption.' -ForegroundColor (Get-UiColor 'Info')
+    Write-UiRule -Tone 'Emphasis'
 }
 
 function Test-AdminRights {
@@ -212,11 +455,36 @@ function Get-DiagnosticReport {
     <#
     .SYNOPSIS
         Collects comprehensive health check data and returns a hashtable snapshot.
-        Displayed as a formatted status table.
+        Displayed as a compact preflight snapshot.
     #>
     Write-Log "DIAGNOSTIC HEALTH CHECK" -Level SECTION
 
     $report = @{}
+
+    # -- System overview --
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $report['Edition'] = $os.Caption
+        $report['OSSummary'] = "$($os.Caption) | Version $($os.Version) | Build $($os.BuildNumber)"
+        $report['IsLTSC'] = ($os.Caption -match 'LTSC|LTSB|IoT')
+    }
+    else {
+        $report['Edition'] = 'Unable to determine'
+        $report['OSSummary'] = 'Unable to read operating system details'
+        $report['IsLTSC'] = $false
+    }
+
+    $systemDrive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+    if ($systemDrive) {
+        $freeGB = [math]::Round($systemDrive.FreeSpace / 1GB, 2)
+        $totalGB = [math]::Round($systemDrive.Size / 1GB, 2)
+        $report['FreeSpaceGB'] = $freeGB
+        $report['SystemDrive'] = "$freeGB GB free of $totalGB GB"
+    }
+    else {
+        $report['FreeSpaceGB'] = $null
+        $report['SystemDrive'] = 'Unable to read disk space'
+    }
 
     # -- Service statuses --
     $coreServices = @('wuauserv', 'bits', 'cryptsvc', 'msiserver')
@@ -282,6 +550,10 @@ function Get-DiagnosticReport {
     }
     $report['PendingReboot'] = if ($pendingReboot) { 'Yes' } else { 'No' }
 
+    # -- pending.xml --
+    $pendingXml = "$env:SystemRoot\WinSxS\pending.xml"
+    $report['PendingXml'] = if (Test-Path $pendingXml) { 'Present' } else { 'Not present' }
+
     # -- Last successful update --
     try {
         $session = New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
@@ -314,60 +586,76 @@ function Get-DiagnosticReport {
     } catch { }
     $report['WUErrors'] = $wuErrors
 
-    # -- Display formatted table --
-    Write-Host ""
-    Write-Host "  +--------------------------------------------+----------------------------+" -ForegroundColor DarkGray
-    Write-Host "  | Component                                  | Status                     |" -ForegroundColor DarkGray
-    Write-Host "  +--------------------------------------------+----------------------------+" -ForegroundColor DarkGray
-
-    foreach ($svc in $report['Services']) {
-        $comp = $svc.Component.PadRight(42)
-        $stat = $svc.Status.PadRight(26)
-        $color = if ($svc.Status -match 'Disabled') { 'Red' } elseif ($svc.Status -match 'Stopped') { 'Yellow' } else { 'Green' }
-        Write-Host "  | $comp | " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$stat" -ForegroundColor $color -NoNewline
-        Write-Host " |" -ForegroundColor DarkGray
+    # -- Hosts file scan --
+    $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+    $blockedDomains = @()
+    if (Test-Path $hostsPath) {
+        $hostsContent = Get-Content -Path $hostsPath -ErrorAction SilentlyContinue
+        foreach ($line in $hostsContent) {
+            foreach ($domain in $Script:MicrosoftDomains) {
+                if ($line -match [regex]::Escape($domain) -and $line -match '^\s*(0\.0\.0\.0|127\.0\.0\.1)\s+') {
+                    $blockedDomains += $domain
+                }
+            }
+        }
+    }
+    $blockedDomains = $blockedDomains | Sort-Object -Unique
+    if ($blockedDomains.Count -gt 0) {
+        $report['HostsStatus'] = "$($blockedDomains.Count) Microsoft block(s) found"
+    }
+    else {
+        $report['HostsStatus'] = 'Clean'
     }
 
+    # -- Display polished preflight snapshot --
+    Write-UiSubheading -Title 'System overview'
+    Write-UiMetric -Label 'Windows' -Value $report['OSSummary']
+    Write-UiMetric -Label 'System drive' -Value $report['SystemDrive'] -Tone $(if ($report['FreeSpaceGB'] -ne $null -and $report['FreeSpaceGB'] -lt 10) { 'Warning' } else { 'Info' })
+    Write-UiMetric -Label 'Hosts file' -Value $report['HostsStatus'] -Tone (Get-StatusTone $report['HostsStatus'])
+    if ($report['IsLTSC']) {
+        Write-UiMetric -Label 'Edition note' -Value 'LTSC / IoT detected - only security updates may be offered.' -Tone 'Warning'
+    }
+
+    Write-UiSubheading -Title 'Core services'
+    foreach ($svc in $report['Services']) {
+        Write-UiMetric -Label $svc.Component -Value $svc.Status -Tone (Get-StatusTone $svc.Status) -LabelWidth 34
+    }
+
+    Write-UiSubheading -Title 'Repair signals'
     $infoRows = @(
         @{ Label = 'SoftwareDistribution'; Value = $report['SoftwareDistribution'] },
         @{ Label = 'catroot2'; Value = $report['Catroot2'] },
-        @{ Label = 'DISM Health'; Value = $report['DISMHealth'] },
-        @{ Label = 'Pending Reboot'; Value = $report['PendingReboot'] },
-        @{ Label = 'Last Successful Update'; Value = $report['LastSuccessfulUpdate'] }
+        @{ Label = 'DISM health'; Value = $report['DISMHealth'] },
+        @{ Label = 'Pending reboot'; Value = $report['PendingReboot'] },
+        @{ Label = 'pending.xml'; Value = $report['PendingXml'] },
+        @{ Label = 'Last successful update'; Value = $report['LastSuccessfulUpdate'] }
     )
 
     foreach ($row in $infoRows) {
-        $lbl = $row.Label.PadRight(42)
-        $val = $row.Value.PadRight(26)
-        $color = 'Cyan'
-        if ($row.Label -eq 'DISM Health') {
-            $color = switch ($row.Value) { 'Healthy' { 'Green' } 'Repairable' { 'Yellow' } default { 'Red' } }
+        $tone = switch ($row.Label) {
+            'Pending reboot' { if ($row.Value -eq 'Yes') { 'Warning' } else { 'Success' } }
+            'pending.xml' { if ($row.Value -eq 'Present') { 'Warning' } else { 'Success' } }
+            'DISM health' { switch ($row.Value) { 'Healthy' { 'Success' } 'Repairable' { 'Warning' } default { 'Error' } } }
+            default { Get-StatusTone $row.Value }
         }
-        if ($row.Label -eq 'Pending Reboot') {
-            $color = if ($row.Value -eq 'Yes') { 'Yellow' } else { 'Green' }
-        }
-        Write-Host "  | $lbl | " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$val" -ForegroundColor $color -NoNewline
-        Write-Host " |" -ForegroundColor DarkGray
+        Write-UiMetric -Label $row.Label -Value $row.Value -Tone $tone
     }
 
-    Write-Host "  +--------------------------------------------+----------------------------+" -ForegroundColor DarkGray
-
-    # Show last 5 WU errors
     if ($report['WUErrors'].Count -gt 0) {
-        Write-Host ""
-        Write-Host "  Last Windows Update Errors:" -ForegroundColor Yellow
-        foreach ($err in $report['WUErrors']) {
-            Write-Host "    [$($err.Time)] $($err.Message)" -ForegroundColor Red
-        }
-    } else {
-        Write-Host ""
-        Write-Host "  No recent Windows Update errors in event log." -ForegroundColor Green
+        Write-UiCallout -Title 'Recent Windows Update errors' -Tone 'Warning' -Lines ($report['WUErrors'] | ForEach-Object {
+            "[{0}] {1}" -f $_.Time, $_.Message
+        })
     }
-    Write-Host ""
+    else {
+        Write-UiCallout -Title 'No recent Windows Update error events were found in the System log.' -Tone 'Success' -Lines @(
+            'This usually means the machine is failing quietly through policy, service, cache, or connectivity issues instead of throwing recent update errors.'
+        )
+    }
 
     # Log all values
+    Write-Log "Windows: $($report['OSSummary'])"
+    Write-Log "System Drive: $($report['SystemDrive'])"
+    Write-Log "Hosts File: $($report['HostsStatus'])"
     foreach ($svc in $report['Services']) {
         Write-Log "$($svc.Component): $($svc.Status)"
     }
@@ -375,6 +663,7 @@ function Get-DiagnosticReport {
     Write-Log "catroot2: $($report['Catroot2'])"
     Write-Log "DISM Health: $($report['DISMHealth'])"
     Write-Log "Pending Reboot: $($report['PendingReboot'])"
+    Write-Log "pending.xml: $($report['PendingXml'])"
     Write-Log "Last Successful Update: $($report['LastSuccessfulUpdate'])"
 
     return $report
@@ -1285,53 +1574,52 @@ function Show-BeforeAfterComparison {
 
     Write-Log "POST-REPAIR VERIFICATION - Before/After Comparison" -Level SECTION
 
-    Write-Host ""
-    Write-Host "  +--------------------------------------------+----------------------------+----------------------------+" -ForegroundColor DarkGray
-    Write-Host "  | Component                                  | BEFORE                     | AFTER                      |" -ForegroundColor DarkGray
-    Write-Host "  +--------------------------------------------+----------------------------+----------------------------+" -ForegroundColor DarkGray
-
-    # Compare services
-    for ($i = 0; $i -lt $Before['Services'].Count; $i++) {
+    Write-UiSubheading -Title 'Service changes'
+    foreach ($i in 0..($Before['Services'].Count - 1)) {
         $bSvc = $Before['Services'][$i]
         $aSvc = $After['Services'][$i]
-        $comp = $bSvc.Component.PadRight(42)
-        $bStat = $bSvc.Status.PadRight(26)
-        $aStat = $aSvc.Status.PadRight(26)
-        $bColor = if ($bSvc.Status -match 'Disabled') { 'Red' } elseif ($bSvc.Status -match 'Stopped') { 'Yellow' } else { 'Green' }
-        $aColor = if ($aSvc.Status -match 'Disabled') { 'Red' } elseif ($aSvc.Status -match 'Stopped') { 'Yellow' } else { 'Green' }
 
-        Write-Host "  | $comp | " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$bStat" -ForegroundColor $bColor -NoNewline
-        Write-Host " | " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$aStat" -ForegroundColor $aColor -NoNewline
-        Write-Host " |" -ForegroundColor DarkGray
+        $tone = if ($bSvc.Status -ne $aSvc.Status) {
+            if ($bSvc.Status -match 'Disabled|Stopped|Not Found' -and $aSvc.Status -notmatch 'Disabled|Stopped|Not Found') {
+                'Success'
+            }
+            else {
+                Get-StatusTone $aSvc.Status
+            }
+        }
+        else {
+            'Info'
+        }
+
+        Write-UiComparisonLine -Label $bSvc.Component -Before $bSvc.Status -After $aSvc.Status -Tone $tone -LabelWidth 34 -BeforeWidth 24
     }
 
-    # Compare info rows
+    Write-UiSubheading -Title 'Repair signal changes'
     $compareKeys = @(
+        @{ Key = 'HostsStatus'; Label = 'Hosts file' },
         @{ Key = 'SoftwareDistribution'; Label = 'SoftwareDistribution' },
         @{ Key = 'Catroot2'; Label = 'catroot2' },
-        @{ Key = 'DISMHealth'; Label = 'DISM Health' },
-        @{ Key = 'PendingReboot'; Label = 'Pending Reboot' },
-        @{ Key = 'LastSuccessfulUpdate'; Label = 'Last Successful Update' }
+        @{ Key = 'DISMHealth'; Label = 'DISM health' },
+        @{ Key = 'PendingReboot'; Label = 'Pending reboot' },
+        @{ Key = 'PendingXml'; Label = 'pending.xml' },
+        @{ Key = 'LastSuccessfulUpdate'; Label = 'Last successful update' }
     )
 
     foreach ($item in $compareKeys) {
-        $lbl = $item.Label.PadRight(42)
-        $bVal = ([string]$Before[$item.Key]).PadRight(26)
-        $aVal = ([string]$After[$item.Key]).PadRight(26)
-        $changed = ($Before[$item.Key] -ne $After[$item.Key])
-        $aColor = if ($changed) { 'Green' } else { 'Cyan' }
+        $beforeValue = [string]$Before[$item.Key]
+        $afterValue = [string]$After[$item.Key]
 
-        Write-Host "  | $lbl | " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$bVal" -ForegroundColor Cyan -NoNewline
-        Write-Host " | " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$aVal" -ForegroundColor $aColor -NoNewline
-        Write-Host " |" -ForegroundColor DarkGray
+        $tone = switch ($item.Key) {
+            'PendingReboot' { if ($afterValue -eq 'No') { 'Success' } else { 'Warning' } }
+            'PendingXml' { if ($afterValue -eq 'Not present') { 'Success' } else { 'Warning' } }
+            'DISMHealth' { switch ($afterValue) { 'Healthy' { 'Success' } 'Repairable' { 'Warning' } default { 'Error' } } }
+            default {
+                if ($beforeValue -ne $afterValue) { 'Success' } else { 'Info' }
+            }
+        }
+
+        Write-UiComparisonLine -Label $item.Label -Before $beforeValue -After $afterValue -Tone $tone
     }
-
-    Write-Host "  +--------------------------------------------+----------------------------+----------------------------+" -ForegroundColor DarkGray
-    Write-Host ""
 }
 
 # ============================================================================
@@ -1382,15 +1670,96 @@ function Start-WURepair {
     if ($SkipSFC -or $QuickMode) { $RepairSFC = $false }
 
     $startTime = Get-Date
+    $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
     Write-Log "WURepair v$($Script:Config.Version) started at $startTime"
     Write-Log "Log file: $($Script:Config.LogPath)"
 
-    Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $(if ($selectiveMode) { 'Selective' } else { 'Full' })" -EventId 1000
+    Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $modeLabel" -EventId 1000
 
     # ── Diagnostic Pre-Check Report ──
     $preReport = Get-DiagnosticReport
 
-    # Create restore point (full mode only)
+    # Test connectivity
+    $connectivity = Test-WindowsUpdateConnectivity
+
+    $plannedSteps = @()
+    if ($selectiveMode) {
+        if ($RepairServices) { $plannedSteps += 'Reset Windows Update service configuration and restart core services.' }
+        if ($RepairDLLs) { $plannedSteps += 'Re-register Windows Update and related system DLLs.' }
+        if ($RepairStore) {
+            $plannedSteps += if (-not $SkipBackup -and $Script:Config.CreateBackup) {
+                'Rename and preserve SoftwareDistribution / catroot2 before rebuilding their contents.'
+            } else {
+                'Reset SoftwareDistribution / catroot2 without creating an extra folder backup.'
+            }
+        }
+        if ($RepairDISM) { $plannedSteps += 'Run DISM to inspect and repair the component store.' }
+        if ($RepairSFC) { $plannedSteps += 'Run System File Checker to repair protected Windows files.' }
+        if ($RepairNetwork) { $plannedSteps += 'Reset Winsock and key network update paths.' }
+    }
+    else {
+        $plannedSteps += @(
+            'Clean Microsoft update blocks from the hosts file and restore key TLS settings.'
+            'Repair firewall rules, service dependencies, and Windows Update blocking policies.'
+            'Stop update-related services, refresh their configuration, and rebuild update caches.'
+            'Re-register update DLLs, reset network components, and clean Windows Update registry state.'
+        )
+        if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
+        if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
+    }
+
+    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore
+    $backupMode = if ($RepairStore) {
+        if (-not $SkipBackup -and $Script:Config.CreateBackup) { 'Enabled before cache reset' } else { 'Skipped for cache reset' }
+    }
+    else {
+        'Not needed for this run'
+    }
+    $restorePointMode = if ($selectiveMode) { 'Not created in targeted mode' } else { 'Attempted immediately after confirmation' }
+    $connectivityLabel = if ($connectivity) { 'All tested Microsoft endpoints are reachable right now' } else { 'One or more update endpoints are currently failing' }
+
+    Write-UiHeader -Title 'Repair plan ready' -Subtitle 'Review the scope below before any system changes are made.' -Tone 'Accent'
+    Write-UiMetric -Label 'Mode' -Value $modeLabel -Tone 'Accent'
+    Write-UiMetric -Label 'Estimated time' -Value $estimatedDuration -Tone 'Info'
+    Write-UiMetric -Label 'Restart' -Value 'Required when repairs finish' -Tone 'Warning'
+    Write-UiMetric -Label 'Backups' -Value $backupMode -Tone 'Info'
+    Write-UiMetric -Label 'Restore point' -Value $restorePointMode -Tone $(if ($selectiveMode) { 'Info' } else { 'Success' })
+    Write-UiMetric -Label 'Connectivity' -Value $connectivityLabel -Tone $(if ($connectivity) { 'Success' } else { 'Warning' })
+    Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
+
+    Write-UiList -Title 'Planned work' -Items $plannedSteps
+
+    if ($preReport['PendingReboot'] -eq 'Yes') {
+        Write-UiCallout -Title 'A reboot is already pending on this device.' -Tone 'Warning' -Lines @(
+            'Windows Update can remain stuck until that restart is completed.',
+            'Continuing is still safe, but the final reboot becomes especially important.'
+        )
+    }
+
+    if ($preReport['HostsStatus'] -ne 'Clean') {
+        Write-UiCallout -Title 'The hosts file is currently blocking Microsoft update domains.' -Tone 'Warning' -Lines @(
+            'That is a common reason for 403 errors, scan failures, or empty update results.',
+            'WURepair will remove only the known update-related block entries.'
+        )
+    }
+
+    if (-not $connectivity) {
+        Write-UiCallout -Title 'Connectivity is degraded before repair starts.' -Tone 'Warning' -Lines @(
+            'This usually points to policy, DNS, TLS, firewall, VPN, or endpoint filtering issues.',
+            'The repair flow will address the most common Windows Update causes automatically.'
+        )
+    }
+
+    Write-UiCallout -Title 'Before you continue' -Tone 'Info' -Lines @(
+        'WURepair focuses on Windows Update services, caches, policies, and connectivity settings.',
+        'The tool does not remove user files, but it will stop services, rename update caches, and may request a restart.'
+    )
+
+    if (-not (Read-Confirmation -Prompt 'Start repair now')) {
+        Write-Log "Operation cancelled by user" -Level WARNING
+        return
+    }
+
     if (-not $selectiveMode) {
         Write-Log ""
         Write-Log "Creating system restore point..."
@@ -1402,50 +1771,6 @@ function Start-WURepair {
         catch {
             Write-Log "Could not create restore point (may be disabled)" -Level WARNING
         }
-    }
-
-    # Run existing diagnostics
-    $diag = Get-WUDiagnostics
-
-    # Test connectivity
-    $connectivity = Test-WindowsUpdateConnectivity
-
-    # Confirm before proceeding
-    Write-Host ""
-    Write-Host "Ready to perform Windows Update repair." -ForegroundColor Yellow
-    if ($selectiveMode) {
-        Write-Host "Selective mode - only running chosen phases:" -ForegroundColor Yellow
-        if ($RepairServices) { Write-Host "  - Repair Services" -ForegroundColor White }
-        if ($RepairDLLs)     { Write-Host "  - Re-register DLLs" -ForegroundColor White }
-        if ($RepairStore)    { Write-Host "  - Reset data stores (SoftwareDistribution/catroot2)" -ForegroundColor White }
-        if ($RepairDISM)     { Write-Host "  - DISM component store repair" -ForegroundColor White }
-        if ($RepairSFC)      { Write-Host "  - System File Checker" -ForegroundColor White }
-        if ($RepairNetwork)  { Write-Host "  - Network stack reset" -ForegroundColor White }
-    } else {
-        Write-Host "This will:" -ForegroundColor Yellow
-        Write-Host "  - Clean hosts file of Microsoft blocks" -ForegroundColor White
-        Write-Host "  - Repair SSL/TLS configuration" -ForegroundColor White
-        Write-Host "  - Fix firewall rules for Windows Update" -ForegroundColor White
-        Write-Host "  - Repair service dependencies (BITS, Delivery Optimization)" -ForegroundColor White
-        Write-Host "  - Remove Windows Update blocking policies" -ForegroundColor White
-        Write-Host "  - Stop Windows Update services" -ForegroundColor White
-        Write-Host "  - Clear update cache and temporary files" -ForegroundColor White
-        Write-Host "  - Re-register system DLLs" -ForegroundColor White
-        Write-Host "  - Reset network components" -ForegroundColor White
-        Write-Host "  - Clean up registry entries" -ForegroundColor White
-        if ($RepairDISM) {
-            Write-Host "  - Run DISM repairs (can take 15-30 minutes)" -ForegroundColor White
-        }
-        if ($RepairSFC) {
-            Write-Host "  - Run System File Checker" -ForegroundColor White
-        }
-    }
-    Write-Host ""
-
-    $confirm = Read-Host "Continue? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') {
-        Write-Log "Operation cancelled by user" -Level WARNING
-        return
     }
 
     # ── Build phase list for progress tracking ──
@@ -1522,7 +1847,7 @@ function Start-WURepair {
     $summaryLines = @(
         "WURepair v$($Script:Config.Version) completed."
         "Duration: $durationMin minutes"
-        "Mode: $(if ($selectiveMode) { 'Selective' } else { 'Full' })"
+        "Mode: $modeLabel"
         "Phases executed: $totalPhases"
         "Post-repair connectivity: $(if ($postConnectivity) { 'All endpoints reachable' } else { 'Some endpoints unreachable' })"
     )
@@ -1534,38 +1859,80 @@ function Start-WURepair {
     Write-Log "Duration: $durationMin minutes"
     Write-Log "Log saved to: $($Script:Config.LogPath)"
 
-    Write-Host ""
-    Write-Host "====================================================================" -ForegroundColor Green
-    Write-Host "                      REPAIR COMPLETE                               " -ForegroundColor Green
-    Write-Host "====================================================================" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  A system RESTART is REQUIRED to complete all repairs." -ForegroundColor Yellow
-    Write-Host "  After restart, check for Windows Updates in Settings." -ForegroundColor White
-    Write-Host ""
+    Write-UiHeader -Title 'Repair complete' -Subtitle 'Restart is strongly recommended to finalize service, cache, and policy changes.' -Tone 'Success'
+    Write-UiMetric -Label 'Duration' -Value "$durationMin minutes" -Tone 'Info'
+    Write-UiMetric -Label 'Mode' -Value $modeLabel -Tone 'Accent'
+    Write-UiMetric -Label 'Phases executed' -Value ([string]$totalPhases) -Tone 'Info'
+    Write-UiMetric -Label 'Connectivity after repair' -Value $(if ($postConnectivity) { 'All tested endpoints are reachable' } else { 'One or more endpoints are still failing' }) -Tone $(if ($postConnectivity) { 'Success' } else { 'Warning' })
+    Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
+
+    Write-UiList -Title 'Next steps' -Items @(
+        'Restart Windows to complete the repair run.',
+        'Open Settings > Windows Update and select Check for updates.',
+        'If issues remain, review the saved log and the WURepair Application event log entry.'
+    )
 
     if (-not $postConnectivity) {
-        Write-Host "  NOTE: Connectivity issues may persist. After restart:" -ForegroundColor Yellow
-        Write-Host "  - Check if third-party antivirus is blocking connections" -ForegroundColor White
-        Write-Host "  - Verify no VPN is interfering" -ForegroundColor White
-        Write-Host "  - Check corporate proxy/firewall settings" -ForegroundColor White
-        Write-Host ""
+        Write-UiCallout -Title 'Connectivity still needs attention after repair.' -Tone 'Warning' -Lines @(
+            'Check for third-party antivirus, VPN, DNS filters, or corporate proxy controls that may still be intercepting update traffic.',
+            'A restart should still be completed before you retest Windows Update.'
+        )
     }
 
-    if ($diag.IsLTSC) {
-        Write-Host "  LTSC EDITION NOTE:" -ForegroundColor Cyan
-        Write-Host "  Your Windows edition only receives security updates." -ForegroundColor White
-        Write-Host "  Feature updates are not available for LTSC/IoT editions." -ForegroundColor White
-        Write-Host ""
+    if ($preReport['IsLTSC']) {
+        Write-UiCallout -Title 'LTSC / IoT edition note' -Tone 'Info' -Lines @(
+            'These editions normally receive security updates only.',
+            'Feature updates not appearing is expected behavior, not a repair failure.'
+        )
     }
 
-    Write-Host "====================================================================" -ForegroundColor Green
-    Write-Host ""
-
-    $restart = Read-Host "Restart now? (Y/N)"
-    if ($restart -match '^[Yy]') {
+    if (Read-Confirmation -Prompt 'Restart now') {
         Write-Log "Initiating restart..."
         Restart-Computer -Force
     }
+    else {
+        Write-Log "Restart deferred by user" -Level WARNING
+    }
+}
+
+function Show-Help {
+    Show-Banner
+
+    Write-UiHeader -Title 'Usage' -Subtitle 'Full guided repair is the default. Add switches only when you want a narrower pass.' -Tone 'Accent'
+    Write-UiMetric -Label 'Full repair' -Value '.\WURepair.ps1'
+    Write-UiMetric -Label 'Quick repair' -Value '.\WURepair.ps1 -Quick'
+    Write-UiMetric -Label 'Targeted repair' -Value '.\WURepair.ps1 -RepairStore -RepairDLLs'
+
+    Write-UiList -Title 'Core options' -Items @(
+        '-Quick or -QuickMode  Skip DISM and SFC for a faster pass.',
+        '-SkipDISM             Skip only DISM component store repair.',
+        '-SkipSFC              Skip only System File Checker.',
+        '-SkipBackup           Skip extra cache folder backups before reset.',
+        '-Help                 Show this help screen.'
+    )
+
+    Write-UiList -Title 'Targeted repair switches' -Items @(
+        '-RepairServices  Reset and restart Windows Update services.',
+        '-RepairDLLs      Re-register Windows Update DLLs.',
+        '-RepairStore     Rebuild SoftwareDistribution and catroot2.',
+        '-RepairDISM      Run DISM component store repair only.',
+        '-RepairSFC       Run System File Checker only.',
+        '-RepairNetwork   Reset network stack and update connectivity paths.',
+        '-RepairAll       Force the full repair flow.'
+    )
+
+    Write-UiList -Title 'Examples' -Items @(
+        '.\WURepair.ps1',
+        '.\WURepair.ps1 -Quick',
+        '.\WURepair.ps1 -RepairServices',
+        '.\WURepair.ps1 -RepairStore -RepairDLLs',
+        '.\WURepair.ps1 -SkipDISM'
+    )
+
+    Write-UiCallout -Title 'What the full repair flow covers' -Tone 'Info' -Lines @(
+        'Hosts file cleanup, TLS repair, firewall and policy fixes, service reset, cache rebuild, DLL registration, network reset, DISM/SFC, and before/after verification.',
+        'Administrator privileges are required and a restart is normally needed at the end.'
+    )
 }
 
 # ============================================================================
@@ -1587,43 +1954,7 @@ if ($args -contains '-RepairNetwork') { $params['RepairNetwork'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
-    Write-Host ""
-    Write-Host "WURepair - Windows Update Repair Tool v$($Script:Config.Version)"
-    Write-Host ""
-    Write-Host "USAGE:"
-    Write-Host "    .\WURepair.ps1 [options]"
-    Write-Host ""
-    Write-Host "OPTIONS:"
-    Write-Host "    -Quick          Skip DISM and SFC scans (faster but less thorough)"
-    Write-Host "    -QuickMode      Same as -Quick"
-    Write-Host "    -SkipDISM       Skip DISM component store repair"
-    Write-Host "    -SkipSFC        Skip System File Checker"
-    Write-Host "    -SkipBackup     Skip backup of Windows Update folders"
-    Write-Host "    -Help           Show this help message"
-    Write-Host ""
-    Write-Host "SELECTIVE REPAIR (run individual phases):"
-    Write-Host "    -RepairServices Reset/restart Windows Update services"
-    Write-Host "    -RepairDLLs     Re-register Windows Update DLLs"
-    Write-Host "    -RepairStore    Rename SoftwareDistribution/catroot2"
-    Write-Host "    -RepairDISM     Run DISM component store repair only"
-    Write-Host "    -RepairSFC      Run System File Checker only"
-    Write-Host "    -RepairNetwork  Reset network stack only"
-    Write-Host "    -RepairAll      Run all phases (default when no switch given)"
-    Write-Host ""
-    Write-Host "EXAMPLES:"
-    Write-Host "    .\WURepair.ps1                      Full repair (recommended)"
-    Write-Host "    .\WURepair.ps1 -Quick               Quick repair without DISM/SFC"
-    Write-Host "    .\WURepair.ps1 -RepairServices      Only reset WU services"
-    Write-Host "    .\WURepair.ps1 -RepairStore -RepairDLLs  Reset stores + re-register DLLs"
-    Write-Host "    .\WURepair.ps1 -SkipDISM            Skip only DISM repair"
-    Write-Host ""
-    Write-Host "NEW IN v2.1.0:"
-    Write-Host "    - Diagnostic pre-check report with formatted status table"
-    Write-Host "    - Selective repair via -Repair* switches"
-    Write-Host "    - Progress tracking (Phase X of Y with percentage)"
-    Write-Host "    - Event log integration (Application log, Source 'WURepair')"
-    Write-Host "    - Post-repair before/after comparison table"
-    Write-Host ""
+    Show-Help
     exit
 }
 
