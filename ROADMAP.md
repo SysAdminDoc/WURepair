@@ -63,13 +63,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 
 ## Research-Driven Additions
 
-- [ ] P1 - Add managed update-source guardrails before policy removal
-  Why: Enterprise WSUS/SUP/WUfB/Intune devices can have valid policy; WURepair should not remove managed source policy without an explicit repair mode.
-  Evidence: current WSUS diagnostics in `WURepair.ps1:1197`; policy removal in `WURepair.ps1:1896`; Microsoft Intune remediations and Windows Update for Business guidance.
-  Touches: `Get-WSUSPostureDiagnostic`, `Repair-UpdatePolicies`, repair plan preview, JSON report.
-  Acceptance: Managed-source detection classifies likely corporate policy, defaults to diagnose-only for those values, and requires a named switch to remove or reset them.
-  Complexity: M
-
 - [ ] P1 - Produce a redacted support bundle
   Why: Logs are useful locally, but support escalation needs one zip with WU, CBS, DISM, USO, event, and JSON artifacts plus basic redaction.
   Evidence: existing JSON report at `WURepair.ps1:3498`; existing WU error parsing at `WURepair.ps1:587`; Microsoft `Get-WindowsUpdateLog` docs; existing roadmap WUfB diagnostic-log note.

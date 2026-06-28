@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.14.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.15.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -41,7 +41,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 
 ### 📋 Policy & Registry Repairs
 - **Removes Blocking Policies**: Clears 10+ registry values that disable Windows Update
-- **WSUS Detection**: Identifies misconfigured WSUS server redirections
+- **WSUS Detection**: Identifies WSUS/SUP/WUfB source policy and preserves managed-source values unless explicitly reset
 - **Registry Cleanup**: Removes stuck reboot flags and pending update markers
 - **Group Policy Refresh**: Forces policy update after changes
 
@@ -60,7 +60,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Ranked HRESULT Summary**: Parses `%WINDIR%\WindowsUpdate.log` and converted Windows Update ETW traces into the top 10 recurring error codes with Microsoft reference links
 - **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
 - **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
-- **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, and policy-driven update-source settings
+- **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, policy-driven update-source settings, and managed-source guardrail status
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
@@ -81,7 +81,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.14.0
+    Windows Update Repair Tool v2.15.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -147,6 +147,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-JournalPath <path>` | Override the mutation journal JSON path |
 | `-RollbackJournal <path>` | Preview reversible changes from a mutation journal |
 | `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
+| `-ResetManagedUpdatePolicy` | Remove managed WSUS/SUP/WUfB source policy values intentionally; default repair preserves them |
 | `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
 | `-Help` | Display help information |
 
@@ -213,6 +214,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 # RMM-safe run with no host UI and stable exit code
 .\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
 
+# Explicitly remove managed WSUS/SUP/WUfB source policy values
+.\WURepair.ps1 -ResetManagedUpdatePolicy
+
 # Preview reversible changes from a previous run
 .\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json
 
@@ -248,7 +252,7 @@ The tool removes blocks for these Microsoft domains (and more):
 | `DisableWindowsUpdateAccess` | Blocks WU UI access |
 | `DoNotConnectToWindowsUpdateInternetLocations` | Blocks online updates |
 | `NoAutoUpdate` | Disables automatic updates |
-| `UseWUServer` | Forces WSUS (when misconfigured) |
+| `UseWUServer` | Forces WSUS; preserved on managed devices unless `-ResetManagedUpdatePolicy` is supplied |
 | `SetDisableUXWUAccess` | Hides update settings |
 
 ### Services Repaired
@@ -322,7 +326,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.14.0 Flow                      │
+│                      WURepair v2.15.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -368,6 +372,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.15.0
+- Added managed update-source guardrails for WSUS/SUP/WUfB policy values
+- Full repair now preserves managed source policy by default and requires `-ResetManagedUpdatePolicy` for intentional removal
 
 ### v2.14.0
 - Catalog SSU downloads now require SHA256 hashing plus valid Microsoft Authenticode signature before `wusa.exe` runs

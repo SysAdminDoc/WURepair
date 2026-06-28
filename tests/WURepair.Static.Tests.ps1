@@ -41,7 +41,10 @@ Describe 'WURepair static contract' {
             'ConvertTo-WUErrorCode',
             'Get-WUErrorArticleLink',
             'Get-WURegistryValue',
+            'Test-WUConfiguredPolicyValue',
+            'Get-WUManagedUpdateSourceGuardrail',
             'Repair-HostsFile',
+            'Repair-UpdatePolicies',
             'Wait-WUServiceState',
             'Invoke-WUServiceControl',
             'Convert-WUCatalogHtmlText',
@@ -86,7 +89,10 @@ Describe 'WURepair static contract' {
             'ConvertTo-WUErrorCode',
             'Get-WUErrorArticleLink',
             'Get-WURegistryValue',
+            'Test-WUConfiguredPolicyValue',
+            'Get-WUManagedUpdateSourceGuardrail',
             'Repair-HostsFile',
+            'Repair-UpdatePolicies',
             'Wait-WUServiceState',
             'Invoke-WUServiceControl',
             'Convert-WUCatalogHtmlText',
@@ -181,6 +187,61 @@ Describe 'WURepair static contract' {
 
         Should -Invoke Test-Path -Times 1 -Exactly
         Should -Invoke Get-ItemProperty -Times 1 -Exactly
+    }
+
+    It 'classifies WSUS and WUfB source policies as managed update sources' {
+        $wsusGuardrail = Get-WUManagedUpdateSourceGuardrail -WUServer 'https://wsus.contoso.local' -WUStatusServer 'https://wsus.contoso.local' -UseWUServer 1
+        $wsusGuardrail.IsManagedSource | Should -BeTrue
+        $wsusGuardrail.Reason | Should -Match 'WSUS/SUP'
+
+        $wufbGuardrail = Get-WUManagedUpdateSourceGuardrail -SetQualitySource 1 -SetFeatureSource 1
+        $wufbGuardrail.IsManagedSource | Should -BeTrue
+        $wufbGuardrail.Reason | Should -Match 'WUfB Quality'
+    }
+
+    It 'preserves managed update-source policies unless reset is explicit' {
+        $values = @{
+            WUServer                   = 'https://wsus.contoso.local'
+            WUStatusServer             = 'https://wsus.contoso.local'
+            UseWUServer                = 1
+            DisableWindowsUpdateAccess = 1
+            SetDisableUXWUAccess       = 1
+        }
+        Mock Get-WURegistryValue {
+            if ($values.ContainsKey($Name)) {
+                return $values[$Name]
+            }
+            return $null
+        }
+        Mock Remove-WURegistryValueWithJournal { $true }
+
+        Repair-UpdatePolicies
+
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 0 -Exactly -ParameterFilter { $Name -eq 'WUServer' }
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 0 -Exactly -ParameterFilter { $Name -eq 'UseWUServer' }
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 1 -Exactly -ParameterFilter { $Name -eq 'DisableWindowsUpdateAccess' }
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 1 -Exactly -ParameterFilter { $Name -eq 'SetDisableUXWUAccess' }
+    }
+
+    It 'removes managed update-source policies when reset is explicit' {
+        $values = @{
+            WUServer       = 'https://wsus.contoso.local'
+            WUStatusServer = 'https://wsus.contoso.local'
+            UseWUServer    = 1
+        }
+        Mock Get-WURegistryValue {
+            if ($values.ContainsKey($Name)) {
+                return $values[$Name]
+            }
+            return $null
+        }
+        Mock Remove-WURegistryValueWithJournal { $true }
+
+        Repair-UpdatePolicies -ResetManagedUpdatePolicy
+
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 1 -Exactly -ParameterFilter { $Name -eq 'WUServer' }
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 1 -Exactly -ParameterFilter { $Name -eq 'WUStatusServer' }
+        Should -Invoke Remove-WURegistryValueWithJournal -Times 1 -Exactly -ParameterFilter { $Name -eq 'UseWUServer' }
     }
 
     It 'removes only blocking Microsoft entries from a temp hosts file' {

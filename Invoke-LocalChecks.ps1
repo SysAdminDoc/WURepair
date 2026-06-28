@@ -45,6 +45,9 @@ $testBatches = @(
         '*parses Catalog*',
         '*validates Catalog*',
         '*rejects Catalog*',
+        '*classifies WSUS*',
+        '*preserves managed*',
+        '*removes managed*',
         '*parses DISM*'
     )
 )
