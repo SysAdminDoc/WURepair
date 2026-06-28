@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.6.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.7.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -37,6 +37,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Service Dependencies**: Ensures RpcSs, EventSystem, SystemEventsBroker are running
 - **Correct Start Types**: Resets all update services to proper configurations
 - **WaaS / USO Repair**: Resets Update Orchestrator services and re-enables disabled USO scheduled tasks
+- **Delivery Optimization Reset**: Clears Delivery Optimization cache and removes stale download-mode policy values
 
 ### 📋 Policy & Registry Repairs
 - **Removes Blocking Policies**: Clears 10+ registry values that disable Windows Update
@@ -74,7 +75,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.6.0
+    Windows Update Repair Tool v2.7.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -150,6 +151,7 @@ Run individual repair phases instead of the full pipeline:
 | `-RepairSFC` | Only run System File Checker |
 | `-RepairNetwork` | Only reset network stack |
 | `-RepairWaaS` | Only reset Update Orchestrator services and USO tasks |
+| `-RepairDelivery` | Only reset Delivery Optimization cache and download mode |
 | `-RepairAll` | Run all phases (default when no switch given) |
 
 Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
@@ -263,7 +265,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.6.0 Flow                       │
+│                      WURepair v2.7.0 Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -307,6 +309,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.7.0
+- Added `-RepairDelivery` to reset Delivery Optimization cache and stale download-mode policy values
+- Full repair now includes Delivery Optimization cache/policy reset
 
 ### v2.6.0
 - Added `-RepairWaaS` to reset Update Orchestrator services and USO scheduled tasks
