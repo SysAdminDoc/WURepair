@@ -63,13 +63,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 
 ## Research-Driven Additions
 
-- [ ] P2 - Add plain-text automation output mode
-  Why: Colorized host UI is useful interactively, but screen readers, logs, and RMM consoles need stable plain text without bullets, progress bars, or color-only status.
-  Evidence: `Write-Host` UI helpers at `WURepair.ps1:245` through `WURepair.ps1:479`; Intune output constraints; accessibility requirement for non-color status.
-  Touches: UI helper functions, `Write-Log`, progress handling, help text.
-  Acceptance: `-PlainText` emits deterministic ASCII status lines, suppresses progress rendering, keeps all status words explicit, and is covered by output snapshot tests.
-  Complexity: S
-
 - [ ] P2 - Add signed release and module packaging metadata
   Why: Existing roadmap names signing and PSGallery separately; implementation needs the manifests and local packaging checks that make those deliverable.
   Evidence: existing Packaging roadmap; PowerShell Gallery publishing docs; `about_Signing`; current tracked files lack `.psd1` or `.psm1` metadata.

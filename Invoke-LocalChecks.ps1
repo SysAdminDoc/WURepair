@@ -32,6 +32,7 @@ $testBatches = @(
         '*uses timeout*',
         '*derives phase*',
         '*wires unattended*',
+        '*emits plain text*',
         '*wires mutation*',
         '*appends mutation*',
         '*applies file-content*'
