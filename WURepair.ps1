@@ -7,13 +7,15 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.2.0 adds ranked Windows Update HRESULT summaries from WindowsUpdate.log
+    and converted ETW traces.
     v2.1.0 adds diagnostic pre-check report, selective repair via parameters,
     progress tracking, event log integration, and post-repair verification
     with before/after comparison.
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.1.0
+    Version: 2.2.0
 #>
 
 #Requires -RunAsAdministrator
@@ -29,7 +31,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.1.0'
+    Version        = '2.2.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -107,6 +109,30 @@ $Script:MicrosoftDomains = @(
     'settings-win.data.microsoft.com',
     'settings.data.microsoft.com'
 )
+
+$Script:WUErrorReferenceUrl = 'https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-error-reference'
+$Script:WUErrorSearchUrl = 'https://learn.microsoft.com/search/?terms='
+$Script:WUErrorArticleMap = @{
+    '0x80070002' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x8007000D' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x80070020' = 'https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-error-reference'
+    '0x80070422' = 'https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-error-reference'
+    '0x80072EE2' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors'
+    '0x80072EFE' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors'
+    '0x80073712' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x8007371B' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x8007371C' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x8007371D' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x800F081F' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x800F0906' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x800F0922' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors'
+    '0x800F0923' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors'
+    '0x8024401C' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors'
+    '0x8024402C' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors'
+    '0x8024500C' = 'https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/common-windows-update-errors'
+}
+$Script:WUTraceLogAttempted = $false
+$Script:WUTraceLogPath = $null
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -448,6 +474,197 @@ function Write-RepairEventLog {
 }
 
 # ============================================================================
+# WINDOWS UPDATE LOG DIAGNOSTICS
+# ============================================================================
+
+function ConvertTo-WUErrorCode {
+    param([AllowNull()][string]$Token)
+
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return $null
+    }
+
+    $value = ([string]$Token).Trim()
+    if ($value -match '^0x[0-9a-fA-F]{8}$') {
+        return $value.ToUpperInvariant()
+    }
+
+    if ($value -match '^-?\d{7,12}$') {
+        try {
+            $number = [int64]$value
+            if ($number -lt 0) {
+                $number = 4294967296 + $number
+            }
+
+            if ($number -ge 0 -and $number -le 4294967295) {
+                return ('0x{0:X8}' -f [uint32]$number)
+            }
+        }
+        catch {
+            return $null
+        }
+    }
+
+    return $null
+}
+
+function Get-WUErrorArticleLink {
+    param([string]$ErrorCode)
+
+    $normalized = ConvertTo-WUErrorCode -Token $ErrorCode
+    if (-not $normalized) {
+        return $Script:WUErrorReferenceUrl
+    }
+
+    if ($Script:WUErrorArticleMap.ContainsKey($normalized)) {
+        return $Script:WUErrorArticleMap[$normalized]
+    }
+
+    if ($normalized -match '^0x8024') {
+        return $Script:WUErrorReferenceUrl
+    }
+
+    $query = [System.Uri]::EscapeDataString("$normalized Windows Update error")
+    return "$($Script:WUErrorSearchUrl)$query"
+}
+
+function Get-WUConvertedTraceLogPath {
+    if ($Script:WUTraceLogAttempted) {
+        return $Script:WUTraceLogPath
+    }
+
+    $Script:WUTraceLogAttempted = $true
+
+    try {
+        $cmd = Get-Command -Name Get-WindowsUpdateLog -ErrorAction SilentlyContinue
+        if (-not $cmd) {
+            return $null
+        }
+
+        if (-not (Test-Path -LiteralPath $Script:Config.TempPath)) {
+            New-Item -Path $Script:Config.TempPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+
+        $logPath = Join-Path $Script:Config.TempPath "WindowsUpdate_ETW_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        $etlRoot = Join-Path $env:SystemRoot 'Logs\WindowsUpdate'
+
+        if (Test-Path -LiteralPath $etlRoot) {
+            $etlFiles = @(Get-ChildItem -LiteralPath $etlRoot -Filter '*.etl' -File -ErrorAction SilentlyContinue)
+            if ($etlFiles.Count -gt 0) {
+                Get-WindowsUpdateLog -ETLPath $etlRoot -LogPath $logPath -ErrorAction Stop | Out-Null
+            }
+            else {
+                Get-WindowsUpdateLog -LogPath $logPath -ErrorAction Stop | Out-Null
+            }
+        }
+        else {
+            Get-WindowsUpdateLog -LogPath $logPath -ErrorAction Stop | Out-Null
+        }
+
+        if (Test-Path -LiteralPath $logPath) {
+            $Script:WUTraceLogPath = $logPath
+            return $logPath
+        }
+    }
+    catch {
+        Write-Log "Could not convert Windows Update ETW traces: $($_.Exception.Message)" -Level WARNING
+    }
+
+    return $null
+}
+
+function Get-WUErrorCodesFromLogFile {
+    param(
+        [string]$Path,
+        [string]$Source
+    )
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $lineNumber = 0
+    try {
+        Get-Content -LiteralPath $Path -ErrorAction Stop | ForEach-Object {
+            $lineNumber++
+            $line = [string]$_
+            $tokens = @()
+
+            foreach ($match in [regex]::Matches($line, '(?i)\b0x[0-9a-f]{8}\b')) {
+                $tokens += $match.Value
+            }
+            foreach ($match in [regex]::Matches($line, '(?<![\w.])-?214[0-9]{7}(?![\w.])')) {
+                $tokens += $match.Value
+            }
+
+            foreach ($token in $tokens) {
+                $code = ConvertTo-WUErrorCode -Token $token
+                if ($code) {
+                    $context = $line.Trim()
+                    if ($context.Length -gt 180) {
+                        $context = $context.Substring(0, 177) + '...'
+                    }
+
+                    [void]$results.Add([PSCustomObject]@{
+                        Code    = $code
+                        Source  = $Source
+                        Line    = $lineNumber
+                        Context = $context
+                    })
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "Could not parse ${Source}: $($_.Exception.Message)" -Level WARNING
+    }
+
+    return $results.ToArray()
+}
+
+function Get-WUErrorSummary {
+    param([int]$MaxEntries = 10)
+
+    $sources = @()
+    $legacyLog = Join-Path $env:SystemRoot 'WindowsUpdate.log'
+    if (Test-Path -LiteralPath $legacyLog) {
+        $sources += [PSCustomObject]@{ Path = $legacyLog; Name = '%WINDIR%\WindowsUpdate.log' }
+    }
+
+    $traceLog = Get-WUConvertedTraceLogPath
+    if ($traceLog) {
+        $sources += [PSCustomObject]@{ Path = $traceLog; Name = 'Converted Windows Update ETW trace' }
+    }
+
+    $events = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($source in $sources) {
+        foreach ($wuEvent in (Get-WUErrorCodesFromLogFile -Path $source.Path -Source $source.Name)) {
+            [void]$events.Add($wuEvent)
+        }
+    }
+
+    if ($events.Count -eq 0) {
+        return @()
+    }
+
+    $summary = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($group in ($events | Group-Object -Property Code | Sort-Object -Property Count -Descending | Select-Object -First $MaxEntries)) {
+        $sample = $group.Group | Select-Object -First 1
+        $sourceList = ($group.Group | Select-Object -ExpandProperty Source -Unique) -join ', '
+        [void]$summary.Add([PSCustomObject]@{
+            Code      = $group.Name
+            Count     = $group.Count
+            Sources   = $sourceList
+            Reference = Get-WUErrorArticleLink -ErrorCode $group.Name
+            Example   = $sample.Context
+        })
+    }
+
+    return $summary.ToArray()
+}
+
+# ============================================================================
 # DIAGNOSTIC PRE-CHECK REPORT
 # ============================================================================
 
@@ -586,6 +803,17 @@ function Get-DiagnosticReport {
     } catch { }
     $report['WUErrors'] = $wuErrors
 
+    # -- Ranked HRESULT summary from WindowsUpdate.log and converted ETW traces --
+    $wuErrorSummary = Get-WUErrorSummary -MaxEntries 10
+    $report['WUErrorSummary'] = $wuErrorSummary
+    if ($wuErrorSummary.Count -gt 0) {
+        $topWUError = $wuErrorSummary | Select-Object -First 1
+        $report['TopWUError'] = "$($topWUError.Code) x$($topWUError.Count)"
+    }
+    else {
+        $report['TopWUError'] = 'None found'
+    }
+
     # -- Hosts file scan --
     $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
     $blockedDomains = @()
@@ -652,6 +880,19 @@ function Get-DiagnosticReport {
         )
     }
 
+    if ($report['WUErrorSummary'].Count -gt 0) {
+        Write-UiSubheading -Title 'Ranked Windows Update HRESULTs'
+        foreach ($entry in $report['WUErrorSummary']) {
+            Write-UiMetric -Label "$($entry.Code) x$($entry.Count)" -Value $entry.Reference -Tone 'Warning' -LabelWidth 18
+            Write-UiMetric -Label 'Sources' -Value $entry.Sources -Tone 'Info' -LabelWidth 18
+        }
+    }
+    else {
+        Write-UiCallout -Title 'No HRESULTs were found in WindowsUpdate.log or converted ETW traces.' -Tone 'Success' -Lines @(
+            'This points attention back to policy, service, cache, connectivity, or event-log failures.'
+        )
+    }
+
     # Log all values
     Write-Log "Windows: $($report['OSSummary'])"
     Write-Log "System Drive: $($report['SystemDrive'])"
@@ -665,6 +906,14 @@ function Get-DiagnosticReport {
     Write-Log "Pending Reboot: $($report['PendingReboot'])"
     Write-Log "pending.xml: $($report['PendingXml'])"
     Write-Log "Last Successful Update: $($report['LastSuccessfulUpdate'])"
+    if ($report['WUErrorSummary'].Count -gt 0) {
+        foreach ($entry in $report['WUErrorSummary']) {
+            Write-Log "WU HRESULT: $($entry.Code) x$($entry.Count) | Sources: $($entry.Sources) | Reference: $($entry.Reference)"
+        }
+    }
+    else {
+        Write-Log "WU HRESULT summary: no matching HRESULTs found in WindowsUpdate.log or converted ETW traces"
+    }
 
     return $report
 }
@@ -1602,7 +1851,8 @@ function Show-BeforeAfterComparison {
         @{ Key = 'DISMHealth'; Label = 'DISM health' },
         @{ Key = 'PendingReboot'; Label = 'Pending reboot' },
         @{ Key = 'PendingXml'; Label = 'pending.xml' },
-        @{ Key = 'LastSuccessfulUpdate'; Label = 'Last successful update' }
+        @{ Key = 'LastSuccessfulUpdate'; Label = 'Last successful update' },
+        @{ Key = 'TopWUError'; Label = 'Top WU HRESULT' }
     )
 
     foreach ($item in $compareKeys) {
