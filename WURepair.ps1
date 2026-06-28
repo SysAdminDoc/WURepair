@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.6.0 adds targeted WaaS / Update Orchestrator repair.
     v2.5.0 adds WSUS/SUP posture diagnostics.
     v2.4.0 adds Microsoft Update Health Tools and remediation detection.
     v2.3.0 adds WaaSMedic and Delivery Optimization health diagnostics.
@@ -18,7 +19,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.5.0
+    Version: 2.6.0
 #>
 
 #Requires -RunAsAdministrator
@@ -34,7 +35,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.5.0'
+    Version        = '2.6.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -355,7 +356,8 @@ function Get-EstimatedRepairDuration {
         [bool]$RepairDISM,
         [bool]$RepairSFC,
         [bool]$RepairNetwork,
-        [bool]$RepairStore
+        [bool]$RepairStore,
+        [bool]$RepairWaaS
     )
 
     $minMinutes = if ($SelectiveMode) { 4 } else { 10 }
@@ -366,6 +368,10 @@ function Get-EstimatedRepairDuration {
         $maxMinutes += 5
     }
     if ($RepairNetwork) {
+        $minMinutes += 1
+        $maxMinutes += 3
+    }
+    if ($RepairWaaS) {
         $minMinutes += 1
         $maxMinutes += 3
     }
@@ -2379,6 +2385,125 @@ function Reset-WindowsUpdateAgent {
     Write-Log "Authorization reset complete" -Level SUCCESS
 }
 
+function Wait-WUServiceState {
+    param(
+        [string]$ServiceName,
+        [string]$DesiredState,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($service -and [string]$service.Status -eq $DesiredState) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
+function Repair-WaaSOrchestrator {
+    Write-Log "WAAS - Resetting Update Orchestrator and USO Tasks" -Level SECTION
+
+    $serviceNames = @('UsoSvc', 'WaaSMedicSvc')
+    $serviceWasRunning = @{}
+
+    foreach ($serviceName in $serviceNames) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if (-not $service) {
+            Write-Log "$serviceName service not found" -Level WARNING
+            continue
+        }
+
+        $serviceWasRunning[$serviceName] = ($service.Status -eq 'Running')
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+        try {
+            $startValue = (Get-ItemProperty -LiteralPath $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
+            if ($startValue -eq 4) {
+                Set-ItemProperty -LiteralPath $regPath -Name 'Start' -Value 3 -Type DWord -Force -ErrorAction Stop
+                Write-Log "$serviceName was disabled, set to Manual" -Level SUCCESS
+            }
+        }
+        catch {
+            Write-Log "Could not adjust $serviceName startup type: $($_.Exception.Message)" -Level WARNING
+        }
+
+        if ($service.Status -eq 'Running') {
+            Write-Log "Stopping $serviceName with sc.exe..."
+            $stopOutput = & sc.exe stop $serviceName 2>&1
+            if ($LASTEXITCODE -eq 0 -and (Wait-WUServiceState -ServiceName $serviceName -DesiredState 'Stopped' -TimeoutSeconds 20)) {
+                Write-Log "$serviceName stopped" -Level SUCCESS
+            }
+            else {
+                Write-Log "Could not confirm $serviceName stopped: $($stopOutput -join ' ')" -Level WARNING
+            }
+        }
+    }
+
+    try {
+        $tasks = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\UpdateOrchestrator\' -ErrorAction Stop)
+        $enabledCount = 0
+        foreach ($task in $tasks) {
+            if ($task.State -eq 'Disabled') {
+                try {
+                    Enable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null
+                    $enabledCount++
+                }
+                catch {
+                    Write-Log "Could not enable Update Orchestrator task $($task.TaskName): $($_.Exception.Message)" -Level WARNING
+                }
+            }
+        }
+
+        Write-Log "Update Orchestrator tasks checked: $($tasks.Count); enabled: $enabledCount" -Level SUCCESS
+
+        $scanTask = $tasks | Where-Object { $_.TaskName -in @('Schedule Scan', 'Schedule Scan Static Task') } | Select-Object -First 1
+        if ($scanTask) {
+            Write-Log "Schedule Scan task is present: $($scanTask.TaskName)" -Level SUCCESS
+        }
+        else {
+            Write-Log "Schedule Scan task was not found under Update Orchestrator" -Level WARNING
+        }
+    }
+    catch {
+        Write-Log "Could not query Update Orchestrator scheduled tasks: $($_.Exception.Message)" -Level WARNING
+    }
+
+    $usoClient = Join-Path $env:SystemRoot 'System32\UsoClient.exe'
+    if (Test-Path -LiteralPath $usoClient) {
+        try {
+            Start-Process -FilePath $usoClient -ArgumentList 'RefreshSettings' -WindowStyle Hidden -Wait -ErrorAction Stop
+            Write-Log "USO settings refreshed" -Level SUCCESS
+        }
+        catch {
+            Write-Log "Could not refresh USO settings: $($_.Exception.Message)" -Level WARNING
+        }
+    }
+    else {
+        Write-Log "UsoClient.exe not found" -Level WARNING
+    }
+
+    foreach ($serviceName in $serviceNames) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if (-not $service) {
+            continue
+        }
+
+        if ($serviceWasRunning[$serviceName] -or $serviceName -eq 'UsoSvc') {
+            Write-Log "Starting $serviceName with sc.exe..."
+            $startOutput = & sc.exe start $serviceName 2>&1
+            if ($LASTEXITCODE -eq 0 -and (Wait-WUServiceState -ServiceName $serviceName -DesiredState 'Running' -TimeoutSeconds 20)) {
+                Write-Log "$serviceName running" -Level SUCCESS
+            }
+            else {
+                Write-Log "Could not confirm $serviceName running: $($startOutput -join ' ')" -Level WARNING
+            }
+        }
+    }
+}
+
 function Update-GroupPolicy {
     Write-Log "POLICY - Refreshing Group Policy" -Level SECTION
 
@@ -2558,6 +2683,7 @@ function Start-WURepair {
         [switch]$RepairDISM,
         [switch]$RepairSFC,
         [switch]$RepairNetwork,
+        [switch]$RepairWaaS,
         [switch]$RepairAll
     )
 
@@ -2573,7 +2699,7 @@ function Start-WURepair {
     Initialize-EventSource
 
     # Determine selective mode: if no specific -Repair* switch given, run all
-    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork)
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS)
     if ($RepairAll -or (-not $selectiveMode)) {
         # Full repair mode
         $RepairServices = $true
@@ -2582,6 +2708,7 @@ function Start-WURepair {
         $RepairDISM     = $true
         $RepairSFC      = $true
         $RepairNetwork  = $true
+        $RepairWaaS     = $true
         $selectiveMode  = $false
     }
 
@@ -2616,19 +2743,20 @@ function Start-WURepair {
         if ($RepairDISM) { $plannedSteps += 'Run DISM to inspect and repair the component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to repair protected Windows files.' }
         if ($RepairNetwork) { $plannedSteps += 'Reset Winsock and key network update paths.' }
+        if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
     }
     else {
         $plannedSteps += @(
             'Clean Microsoft update blocks from the hosts file and restore key TLS settings.'
             'Repair firewall rules, service dependencies, and Windows Update blocking policies.'
             'Stop update-related services, refresh their configuration, and rebuild update caches.'
-            'Re-register update DLLs, reset network components, and clean Windows Update registry state.'
+            'Re-register update DLLs, reset network components, clean registry state, and refresh Update Orchestrator.'
         )
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
     }
 
-    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore
+    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS
     $backupMode = if ($RepairStore) {
         if (-not $SkipBackup -and $Script:Config.CreateBackup) { 'Enabled before cache reset' } else { 'Skipped for cache reset' }
     }
@@ -2719,6 +2847,9 @@ function Start-WURepair {
     }
     if ($RepairNetwork) {
         $phases += @{ Name = 'Reset Network Stack';        Action = { Reset-WinsockCatalog } }
+    }
+    if ($RepairWaaS) {
+        $phases += @{ Name = 'Reset WaaS Orchestrator';    Action = { Repair-WaaSOrchestrator } }
     }
     if ($RepairDISM) {
         $phases += @{ Name = 'DISM Repairs';               Action = { Invoke-DISM } }
@@ -2838,6 +2969,7 @@ function Show-Help {
         '-RepairDISM      Run DISM component store repair only.',
         '-RepairSFC       Run System File Checker only.',
         '-RepairNetwork   Reset network stack and update connectivity paths.',
+        '-RepairWaaS      Reset Update Orchestrator services and USO tasks.',
         '-RepairAll       Force the full repair flow.'
     )
 
@@ -2871,6 +3003,7 @@ if ($args -contains '-RepairStore') { $params['RepairStore'] = $true }
 if ($args -contains '-RepairDISM') { $params['RepairDISM'] = $true }
 if ($args -contains '-RepairSFC') { $params['RepairSFC'] = $true }
 if ($args -contains '-RepairNetwork') { $params['RepairNetwork'] = $true }
+if ($args -contains '-RepairWaaS') { $params['RepairWaaS'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
