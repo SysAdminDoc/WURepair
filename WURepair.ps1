@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.3.0 adds WaaSMedic and Delivery Optimization health diagnostics.
     v2.2.0 adds ranked Windows Update HRESULT summaries from WindowsUpdate.log
     and converted ETW traces.
     v2.1.0 adds diagnostic pre-check report, selective repair via parameters,
@@ -15,7 +16,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.2.0
+    Version: 2.3.0
 #>
 
 #Requires -RunAsAdministrator
@@ -31,7 +32,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.2.0'
+    Version        = '2.3.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -200,7 +201,7 @@ function Get-StatusTone {
         return 'Info'
     }
 
-    if ($Value -match 'Disabled|Not Found|BLOCKED|UNREACHABLE|DNS FAILURE|SSL/TLS ERROR|Corrupted|Unable|Failed') {
+    if ($Value -match 'Disabled|Not Found|BLOCKED|UNREACHABLE|DNS FAILURE|SSL/TLS ERROR|Corrupted|Unable|Unavailable|Failed|Not ready|Cache path missing|Inaccessible') {
         return 'Error'
     }
 
@@ -664,6 +665,303 @@ function Get-WUErrorSummary {
     return $summary.ToArray()
 }
 
+function Format-WUByteSize {
+    param([AllowNull()][object]$Bytes)
+
+    if ($null -eq $Bytes) {
+        return 'Unavailable'
+    }
+
+    try {
+        $value = [double]$Bytes
+    }
+    catch {
+        return 'Unavailable'
+    }
+
+    if ($value -lt 0) {
+        return 'Unavailable'
+    }
+
+    if ($value -ge 1TB) { return ('{0:N2} TB' -f ($value / 1TB)) }
+    if ($value -ge 1GB) { return ('{0:N2} GB' -f ($value / 1GB)) }
+    if ($value -ge 1MB) { return ('{0:N2} MB' -f ($value / 1MB)) }
+    if ($value -ge 1KB) { return ('{0:N2} KB' -f ($value / 1KB)) }
+    return ('{0:N0} B' -f $value)
+}
+
+function Get-WUServiceStateLabel {
+    param([string]$ServiceName)
+
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service) {
+        return 'Not Found'
+    }
+
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    $startVal = (Get-ItemProperty -LiteralPath $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
+    $startLabel = switch ($startVal) {
+        0 { 'Boot' }
+        1 { 'System' }
+        2 { 'Automatic' }
+        3 { 'Manual' }
+        4 { 'Disabled' }
+        default { 'Unknown' }
+    }
+
+    return "$($service.Status) ($startLabel)"
+}
+
+function Get-WUNumericPropertyValue {
+    param(
+        [AllowNull()][object]$InputObject,
+        [string[]]$Names
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    foreach ($name in $Names) {
+        $property = $InputObject.PSObject.Properties[$name]
+        if ($null -ne $property -and $null -ne $property.Value) {
+            try {
+                return [double]$property.Value
+            }
+            catch {
+                continue
+            }
+        }
+    }
+
+    return $null
+}
+
+function Measure-WUNumericPropertyTotal {
+    param(
+        [object[]]$InputObject,
+        [string[]]$Names
+    )
+
+    $found = $false
+    $total = 0.0
+
+    foreach ($item in $InputObject) {
+        foreach ($name in $Names) {
+            $value = Get-WUNumericPropertyValue -InputObject $item -Names @($name)
+            if ($null -ne $value) {
+                $total += $value
+                $found = $true
+            }
+        }
+    }
+
+    if ($found) {
+        return $total
+    }
+
+    return $null
+}
+
+function Get-WaaSMedicDiagnostic {
+    $serviceStatus = Get-WUServiceStateLabel -ServiceName 'WaaSMedicSvc'
+    $taskSummary = 'Not available'
+    $recentIssues = New-Object 'System.Collections.Generic.List[object]'
+
+    try {
+        $tasks = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\WaaSMedic\' -ErrorAction SilentlyContinue)
+        if ($tasks.Count -gt 0) {
+            $ready = @($tasks | Where-Object { $_.State -eq 'Ready' }).Count
+            $running = @($tasks | Where-Object { $_.State -eq 'Running' }).Count
+            $disabled = @($tasks | Where-Object { $_.State -eq 'Disabled' }).Count
+            $taskSummary = "$($tasks.Count) task(s), $ready ready, $running running, $disabled disabled"
+        }
+        else {
+            $taskSummary = 'No WaaSMedic scheduled tasks found'
+        }
+    }
+    catch {
+        $taskSummary = 'Unable to query scheduled tasks'
+    }
+
+    $logNames = @(
+        'Microsoft-Windows-WaaSMedic/Operational',
+        'Microsoft-Windows-WaaSMedicSvc/Operational'
+    )
+
+    foreach ($logName in $logNames) {
+        try {
+            $null = Get-WinEvent -ListLog $logName -ErrorAction Stop
+            $events = @(Get-WinEvent -FilterHashtable @{
+                LogName   = $logName
+                Level     = @(2, 3)
+                StartTime = (Get-Date).AddDays(-14)
+            } -MaxEvents 5 -ErrorAction SilentlyContinue)
+
+            foreach ($medicEvent in $events) {
+                $message = $medicEvent.Message -replace "`r`n|`n", ' '
+                if ($message.Length -gt 120) {
+                    $message = $message.Substring(0, 117) + '...'
+                }
+                [void]$recentIssues.Add([PSCustomObject]@{
+                    Time    = $medicEvent.TimeCreated.ToString('yyyy-MM-dd HH:mm')
+                    LogName = $logName
+                    Message = $message
+                })
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    $recentIssueText = if ($recentIssues.Count -gt 0) {
+        "$($recentIssues.Count) warning/error event(s) in the last 14 days"
+    }
+    else {
+        'No recent warning/error events'
+    }
+
+    return [PSCustomObject]@{
+        ServiceStatus = $serviceStatus
+        TaskSummary   = $taskSummary
+        RecentIssues  = $recentIssues.ToArray()
+        IssueSummary  = $recentIssueText
+    }
+}
+
+function Get-DeliveryOptimizationDiagnostic {
+    $serviceStatus = Get-WUServiceStateLabel -ServiceName 'dosvc'
+    $statusRows = @()
+    $perfSnap = $null
+    $statusAvailable = $false
+    $perfAvailable = $false
+
+    if (Get-Command -Name Get-DeliveryOptimizationStatus -ErrorAction SilentlyContinue) {
+        try {
+            $statusRows = @(Get-DeliveryOptimizationStatus -ErrorAction Stop -WarningAction SilentlyContinue)
+            $statusAvailable = $true
+        }
+        catch {
+            $statusRows = @()
+        }
+    }
+
+    if (Get-Command -Name Get-DeliveryOptimizationPerfSnap -ErrorAction SilentlyContinue) {
+        try {
+            $perfSnap = Get-DeliveryOptimizationPerfSnap -ErrorAction Stop -WarningAction SilentlyContinue
+            $perfAvailable = $true
+        }
+        catch {
+            $perfSnap = $null
+        }
+    }
+
+    $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
+    $downloadMode = $null
+    if (Test-Path -LiteralPath $policyPath) {
+        $downloadMode = (Get-ItemProperty -LiteralPath $policyPath -Name 'DODownloadMode' -ErrorAction SilentlyContinue).DODownloadMode
+    }
+
+    if ($null -eq $downloadMode -and $statusRows.Count -gt 0) {
+        $downloadMode = Get-WUNumericPropertyValue -InputObject ($statusRows | Select-Object -First 1) -Names @('DODownloadMode', 'DownloadMode')
+    }
+
+    $downloadModeText = switch ([string]$downloadMode) {
+        '0' { 'HTTP only / peering disabled' }
+        '1' { 'LAN peering' }
+        '2' { 'Group peering' }
+        '3' { 'Internet peering' }
+        '99' { 'Simple download mode' }
+        '100' { 'Bypass mode' }
+        '' { 'Not configured' }
+        default {
+            if ($null -eq $downloadMode) { 'Not configured' } else { "Mode $downloadMode" }
+        }
+    }
+
+    $cachePath = "$env:SystemRoot\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache"
+    if ($statusRows.Count -gt 0) {
+        $statusCachePath = ($statusRows | Select-Object -First 1).PSObject.Properties['LocalCachePath']
+        if ($null -ne $statusCachePath -and -not [string]::IsNullOrWhiteSpace([string]$statusCachePath.Value)) {
+            $cachePath = [string]$statusCachePath.Value
+        }
+    }
+
+    $cacheSize = $null
+    $cacheStatus = try {
+        if (-not (Test-Path -LiteralPath $cachePath -ErrorAction Stop)) {
+            "Missing ($cachePath)"
+        }
+        else {
+            try {
+                $cacheSize = (Get-ChildItem -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue |
+                    Measure-Object -Property Length -Sum).Sum
+                "Available ($cachePath)"
+            }
+            catch {
+                "Available, size unreadable ($cachePath)"
+            }
+        }
+    }
+    catch {
+        "Inaccessible ($cachePath)"
+    }
+    $bytesFromHttp = Get-WUNumericPropertyValue -InputObject $perfSnap -Names @('BytesFromHttp', 'BytesFromCDN')
+    if ($null -eq $bytesFromHttp) {
+        $bytesFromHttp = Measure-WUNumericPropertyTotal -InputObject $statusRows -Names @('BytesFromHttp', 'BytesFromCDN')
+    }
+
+    $bytesFromPeers = Measure-WUNumericPropertyTotal -InputObject @($perfSnap) -Names @('BytesFromPeers', 'BytesFromLanPeers', 'BytesFromGroupPeers', 'BytesFromInternetPeers')
+    if ($null -eq $bytesFromPeers) {
+        $bytesFromPeers = Measure-WUNumericPropertyTotal -InputObject $statusRows -Names @('BytesFromPeers', 'BytesFromLanPeers', 'BytesFromGroupPeers', 'BytesFromInternetPeers')
+    }
+
+    $bytesToPeers = Measure-WUNumericPropertyTotal -InputObject @($perfSnap) -Names @('BytesToPeers', 'BytesToLanPeers', 'BytesToGroupPeers', 'BytesToInternetPeers')
+    if ($null -eq $bytesToPeers) {
+        $bytesToPeers = Measure-WUNumericPropertyTotal -InputObject $statusRows -Names @('BytesToPeers', 'BytesToLanPeers', 'BytesToGroupPeers', 'BytesToInternetPeers')
+    }
+
+    $peerCount = Get-WUNumericPropertyValue -InputObject $perfSnap -Names @('NumberOfPeers', 'PeerCount')
+    if ($null -eq $peerCount -and $statusRows.Count -gt 0) {
+        $peerCount = Measure-WUNumericPropertyTotal -InputObject $statusRows -Names @('NumberOfPeers', 'PeerCount')
+    }
+
+    $peerCacheHealth = if ($serviceStatus -match 'Not Found|Disabled') {
+        'Not ready - Delivery Optimization service unavailable'
+    }
+    elseif (-not $statusAvailable -and -not $perfAvailable) {
+        'Cmdlets unavailable - cannot inspect peer cache'
+    }
+    elseif ($downloadModeText -match 'disabled|Simple|Bypass') {
+        "Peering limited - $downloadModeText"
+    }
+    elseif ($cacheStatus -match '^Missing') {
+        'Cache path missing'
+    }
+    elseif (($null -ne $bytesFromPeers -and $bytesFromPeers -gt 0) -or ($null -ne $bytesToPeers -and $bytesToPeers -gt 0)) {
+        'Peer activity observed'
+    }
+    else {
+        'Ready; no peer activity observed'
+    }
+
+    return [PSCustomObject]@{
+        ServiceStatus      = $serviceStatus
+        DownloadMode       = $downloadModeText
+        ActiveJobs         = $statusRows.Count
+        PeerCacheHealth    = $peerCacheHealth
+        CacheStatus        = $cacheStatus
+        CacheSize          = Format-WUByteSize -Bytes $cacheSize
+        BytesFromHttp      = Format-WUByteSize -Bytes $bytesFromHttp
+        BytesFromPeers     = Format-WUByteSize -Bytes $bytesFromPeers
+        BytesToPeers       = Format-WUByteSize -Bytes $bytesToPeers
+        PeerCount          = if ($null -eq $peerCount) { 'Unavailable' } else { [string][int]$peerCount }
+        StatusCmdlet       = if ($statusAvailable) { 'Available' } else { 'Unavailable' }
+        PerfSnapCmdlet     = if ($perfAvailable) { 'Available' } else { 'Unavailable' }
+    }
+}
+
 # ============================================================================
 # DIAGNOSTIC PRE-CHECK REPORT
 # ============================================================================
@@ -719,6 +1017,15 @@ function Get-DiagnosticReport {
         $serviceResults += [PSCustomObject]@{ Component = $svc.DisplayName; Status = $statusLabel }
     }
     $report['Services'] = $serviceResults
+
+    # -- WaaSMedic and Delivery Optimization diagnostics --
+    $waaSMedic = Get-WaaSMedicDiagnostic
+    $deliveryOptimization = Get-DeliveryOptimizationDiagnostic
+    $report['WaaSMedic'] = $waaSMedic
+    $report['DeliveryOptimization'] = $deliveryOptimization
+    $report['WaaSMedicStatus'] = $waaSMedic.ServiceStatus
+    $report['DeliveryOptimizationPeerCache'] = $deliveryOptimization.PeerCacheHealth
+    $report['DeliveryOptimizationMode'] = $deliveryOptimization.DownloadMode
 
     # -- SoftwareDistribution folder --
     $sdPath = "$env:SystemRoot\SoftwareDistribution"
@@ -849,6 +1156,20 @@ function Get-DiagnosticReport {
         Write-UiMetric -Label $svc.Component -Value $svc.Status -Tone (Get-StatusTone $svc.Status) -LabelWidth 34
     }
 
+    Write-UiSubheading -Title 'WaaSMedic and Delivery Optimization'
+    Write-UiMetric -Label 'WaaSMedic service' -Value $report['WaaSMedic'].ServiceStatus -Tone (Get-StatusTone $report['WaaSMedic'].ServiceStatus)
+    Write-UiMetric -Label 'WaaSMedic tasks' -Value $report['WaaSMedic'].TaskSummary -Tone (Get-StatusTone $report['WaaSMedic'].TaskSummary)
+    Write-UiMetric -Label 'WaaSMedic events' -Value $report['WaaSMedic'].IssueSummary -Tone (Get-StatusTone $report['WaaSMedic'].IssueSummary)
+    Write-UiMetric -Label 'DO service' -Value $report['DeliveryOptimization'].ServiceStatus -Tone (Get-StatusTone $report['DeliveryOptimization'].ServiceStatus)
+    Write-UiMetric -Label 'DO download mode' -Value $report['DeliveryOptimization'].DownloadMode -Tone (Get-StatusTone $report['DeliveryOptimization'].DownloadMode)
+    Write-UiMetric -Label 'DO peer cache' -Value $report['DeliveryOptimization'].PeerCacheHealth -Tone (Get-StatusTone $report['DeliveryOptimization'].PeerCacheHealth)
+    Write-UiMetric -Label 'DO cache size' -Value $report['DeliveryOptimization'].CacheSize -Tone 'Info'
+    Write-UiMetric -Label 'DO active jobs' -Value ([string]$report['DeliveryOptimization'].ActiveJobs) -Tone 'Info'
+    Write-UiMetric -Label 'DO bytes from HTTP' -Value $report['DeliveryOptimization'].BytesFromHttp -Tone 'Info'
+    Write-UiMetric -Label 'DO bytes from peers' -Value $report['DeliveryOptimization'].BytesFromPeers -Tone 'Info'
+    Write-UiMetric -Label 'DO bytes to peers' -Value $report['DeliveryOptimization'].BytesToPeers -Tone 'Info'
+    Write-UiMetric -Label 'DO peer count' -Value $report['DeliveryOptimization'].PeerCount -Tone 'Info'
+
     Write-UiSubheading -Title 'Repair signals'
     $infoRows = @(
         @{ Label = 'SoftwareDistribution'; Value = $report['SoftwareDistribution'] },
@@ -900,6 +1221,22 @@ function Get-DiagnosticReport {
     foreach ($svc in $report['Services']) {
         Write-Log "$($svc.Component): $($svc.Status)"
     }
+    Write-Log "WaaSMedic Service: $($report['WaaSMedic'].ServiceStatus)"
+    Write-Log "WaaSMedic Tasks: $($report['WaaSMedic'].TaskSummary)"
+    Write-Log "WaaSMedic Events: $($report['WaaSMedic'].IssueSummary)"
+    foreach ($medicIssue in $report['WaaSMedic'].RecentIssues) {
+        Write-Log "WaaSMedic Event: [$($medicIssue.Time)] $($medicIssue.LogName) - $($medicIssue.Message)"
+    }
+    Write-Log "Delivery Optimization Service: $($report['DeliveryOptimization'].ServiceStatus)"
+    Write-Log "Delivery Optimization Mode: $($report['DeliveryOptimization'].DownloadMode)"
+    Write-Log "Delivery Optimization Peer Cache: $($report['DeliveryOptimization'].PeerCacheHealth)"
+    Write-Log "Delivery Optimization Cache: $($report['DeliveryOptimization'].CacheStatus)"
+    Write-Log "Delivery Optimization Cache Size: $($report['DeliveryOptimization'].CacheSize)"
+    Write-Log "Delivery Optimization Active Jobs: $($report['DeliveryOptimization'].ActiveJobs)"
+    Write-Log "Delivery Optimization Bytes From HTTP: $($report['DeliveryOptimization'].BytesFromHttp)"
+    Write-Log "Delivery Optimization Bytes From Peers: $($report['DeliveryOptimization'].BytesFromPeers)"
+    Write-Log "Delivery Optimization Bytes To Peers: $($report['DeliveryOptimization'].BytesToPeers)"
+    Write-Log "Delivery Optimization Peer Count: $($report['DeliveryOptimization'].PeerCount)"
     Write-Log "SoftwareDistribution: $($report['SoftwareDistribution'])"
     Write-Log "catroot2: $($report['Catroot2'])"
     Write-Log "DISM Health: $($report['DISMHealth'])"
@@ -1846,6 +2183,9 @@ function Show-BeforeAfterComparison {
     Write-UiSubheading -Title 'Repair signal changes'
     $compareKeys = @(
         @{ Key = 'HostsStatus'; Label = 'Hosts file' },
+        @{ Key = 'WaaSMedicStatus'; Label = 'WaaSMedic service' },
+        @{ Key = 'DeliveryOptimizationMode'; Label = 'DO download mode' },
+        @{ Key = 'DeliveryOptimizationPeerCache'; Label = 'DO peer cache' },
         @{ Key = 'SoftwareDistribution'; Label = 'SoftwareDistribution' },
         @{ Key = 'Catroot2'; Label = 'catroot2' },
         @{ Key = 'DISMHealth'; Label = 'DISM health' },
