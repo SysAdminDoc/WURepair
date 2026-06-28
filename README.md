@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.15.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.16.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -65,6 +65,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
 - **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
+- **Support Bundle**: Optional `-SupportBundle <path>` writes a redacted zip with WURepair logs, JSON report, Windows Update log, event exports, and CBS/DISM tails
 - **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
 - **Mutation Journal & Rollback**: Writes a per-run JSON journal of hosts, registry, policy, and cache mutations; `-RollbackJournal` previews/apply reversible changes
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
@@ -81,7 +82,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.15.0
+    Windows Update Repair Tool v2.16.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -144,10 +145,12 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipBackup` | Skip backup of Windows Update folders |
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
+| `-SupportBundle <path>` | Create a redacted zip with WURepair log, JSON report, WindowsUpdate.log, relevant events, and CBS/DISM tails |
 | `-JournalPath <path>` | Override the mutation journal JSON path |
 | `-RollbackJournal <path>` | Preview reversible changes from a mutation journal |
 | `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
 | `-ResetManagedUpdatePolicy` | Remove managed WSUS/SUP/WUfB source policy values intentionally; default repair preserves them |
+| `-NoRedact` | Keep usernames, device names, profile paths, and SIDs in support bundles |
 | `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
 | `-Help` | Display help information |
 
@@ -210,6 +213,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Full repair with RMM-readable JSON report
 .\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json
+
+# Full repair with a redacted support bundle
+.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip
 
 # RMM-safe run with no host UI and stable exit code
 .\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
@@ -298,6 +304,7 @@ Windows 10/11 LTSC and IoT editions only receive security updates. Feature updat
 |------|----------|---------|
 | `WURepair_[timestamp].log` | Desktop | Detailed operation log |
 | `WURepair_Journal_[timestamp].json` | Desktop | Machine-readable mutation journal and rollback data |
+| `WURepair-support.zip` | User-supplied `-SupportBundle` path | Redacted support bundle with logs, JSON report, event exports, WindowsUpdate.log, and CBS/DISM tails |
 | `SoftwareDistribution.bak.[timestamp]` | C:\Windows | Backup of update cache |
 | `catroot2.bak.[timestamp]` | C:\Windows\System32 | Backup of crypto cache |
 | `hosts.backup.[timestamp]` | C:\Windows\System32\drivers\etc | Backup of hosts file |
@@ -326,7 +333,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.15.0 Flow                      │
+│                      WURepair v2.16.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -350,7 +357,8 @@ To preview or apply journal rollback:
 │ 20. Post-Repair Connectivity Test                               │
 │ 21. Post-Repair Verification (before/after comparison)          │
 │ 22. Trigger Update Scan                                         │
-│ 23. Write Event Log Summary / JSON report / journal / exit code │
+│ 23. Write Event Log Summary / JSON report / support bundle      │
+│ 24. Write mutation journal / exit code                          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -362,6 +370,7 @@ To preview or apply journal rollback:
 - ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
 - ✅ **Restore point** - System restore point created automatically
 - ✅ **Detailed logging** - Full audit trail saved to Desktop
+- ✅ **Redacted support bundles** - `-SupportBundle` redacts usernames, device names, profile paths, and SIDs unless `-NoRedact` is supplied
 
 ## Contributing
 
@@ -372,6 +381,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.16.0
+- Added `-SupportBundle <path>` to create redacted diagnostic zip archives
+- Support bundles include WURepair log, JSON report, WindowsUpdate.log, CBS/DISM tails, relevant event exports, and a manifest
+- Catalog package SHA256 validation now falls back to .NET hashing when `Get-FileHash` is unavailable
 
 ### v2.15.0
 - Added managed update-source guardrails for WSUS/SUP/WUfB policy values

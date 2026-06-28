@@ -63,13 +63,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 
 ## Research-Driven Additions
 
-- [ ] P1 - Produce a redacted support bundle
-  Why: Logs are useful locally, but support escalation needs one zip with WU, CBS, DISM, USO, event, and JSON artifacts plus basic redaction.
-  Evidence: existing JSON report at `WURepair.ps1:3498`; existing WU error parsing at `WURepair.ps1:587`; Microsoft `Get-WindowsUpdateLog` docs; existing roadmap WUfB diagnostic-log note.
-  Touches: diagnostics, logging, JSON report, optional zip packaging.
-  Acceptance: `-SupportBundle <path>` creates a zip containing WURepair log, JSON report, WindowsUpdate.log, relevant event exports, CBS/DISM tails, and a manifest; usernames/device identifiers are redacted unless `-NoRedact` is supplied.
-  Complexity: M
-
 - [ ] P2 - Add plain-text automation output mode
   Why: Colorized host UI is useful interactively, but screen readers, logs, and RMM consoles need stable plain text without bullets, progress bars, or color-only status.
   Evidence: `Write-Host` UI helpers at `WURepair.ps1:245` through `WURepair.ps1:479`; Intune output constraints; accessibility requirement for non-color status.

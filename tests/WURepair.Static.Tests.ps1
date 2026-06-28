@@ -47,8 +47,17 @@ Describe 'WURepair static contract' {
             'Repair-UpdatePolicies',
             'Wait-WUServiceState',
             'Invoke-WUServiceControl',
+            'Get-WUConvertedTraceLogPath',
             'Convert-WUCatalogHtmlText',
+            'Get-WUFileSha256',
             'Test-WUCatalogPackageValidation',
+            'Resolve-WUSupportBundlePath',
+            'ConvertTo-WUSupportBundleText',
+            'Add-WUSupportBundleTextFile',
+            'Add-WUSupportBundleFile',
+            'Add-WUSupportBundleTailFile',
+            'Add-WUSupportBundleEventExport',
+            'New-WUSupportBundle',
             'Convert-WUSizeToMegabyte',
             'Get-ComponentStoreAnalysis'
         )
@@ -95,8 +104,17 @@ Describe 'WURepair static contract' {
             'Repair-UpdatePolicies',
             'Wait-WUServiceState',
             'Invoke-WUServiceControl',
+            'Get-WUConvertedTraceLogPath',
             'Convert-WUCatalogHtmlText',
+            'Get-WUFileSha256',
             'Test-WUCatalogPackageValidation',
+            'Resolve-WUSupportBundlePath',
+            'ConvertTo-WUSupportBundleText',
+            'Add-WUSupportBundleTextFile',
+            'Add-WUSupportBundleFile',
+            'Add-WUSupportBundleTailFile',
+            'Add-WUSupportBundleEventExport',
+            'New-WUSupportBundle',
             'Convert-WUSizeToMegabyte',
             'Get-ComponentStoreAnalysis',
             'sc.exe',
@@ -244,6 +262,88 @@ Describe 'WURepair static contract' {
         Should -Invoke Remove-WURegistryValueWithJournal -Times 1 -Exactly -ParameterFilter { $Name -eq 'UseWUServer' }
     }
 
+    It 'redacts support bundle identifiers by default' {
+        $originalUserName = $env:USERNAME
+        $originalUserProfile = $env:USERPROFILE
+        $originalComputerName = $env:COMPUTERNAME
+        try {
+            $env:USERNAME = 'Alice'
+            $env:USERPROFILE = 'C:\Users\Alice'
+            $env:COMPUTERNAME = 'DESKTOP-TEST'
+            $sample = 'Alice used C:\Users\Alice\Desktop on DESKTOP-TEST with S-1-5-21-111-222-333-1001.'
+
+            $redacted = ConvertTo-WUSupportBundleText -Text $sample
+            $redacted | Should -Not -Match 'Alice'
+            $redacted | Should -Not -Match 'DESKTOP-TEST'
+            $redacted | Should -Not -Match 'S-1-5-21'
+            $redacted | Should -Match '<redacted-user>'
+            $redacted | Should -Match '<redacted-computer>'
+
+            $plain = ConvertTo-WUSupportBundleText -Text $sample -NoRedact
+            $plain | Should -Match 'Alice'
+            $plain | Should -Match 'DESKTOP-TEST'
+        }
+        finally {
+            $env:USERNAME = $originalUserName
+            $env:USERPROFILE = $originalUserProfile
+            $env:COMPUTERNAME = $originalComputerName
+        }
+    }
+
+    It 'creates a redacted support bundle zip with manifest and core artifacts' {
+        $originalUserName = $env:USERNAME
+        $originalUserProfile = $env:USERPROFILE
+        $originalComputerName = $env:COMPUTERNAME
+        try {
+            $env:USERNAME = 'Alice'
+            $env:USERPROFILE = 'C:\Users\Alice'
+            $env:COMPUTERNAME = 'DESKTOP-TEST'
+            $Script:Config.TempPath = Join-Path $TestDrive 'Temp'
+            $Script:Config.LogPath = Join-Path $TestDrive 'WURepair.log'
+            $Script:Config.Version = '9.9.9-test'
+            Set-Content -LiteralPath $Script:Config.LogPath -Value 'Alice on DESKTOP-TEST at C:\Users\Alice\Desktop'
+            $jsonPath = Join-Path $TestDrive 'report.json'
+            Set-Content -LiteralPath $jsonPath -Value '{"ComputerName":"DESKTOP-TEST","User":"Alice"}'
+            Mock Get-WUConvertedTraceLogPath { $null }
+            Mock Get-WinEvent { @() }
+
+            $bundlePath = Join-Path $TestDrive 'support.zip'
+            $result = New-WUSupportBundle -Path $bundlePath -JsonReportPath $jsonPath -ModeLabel 'Test' -OverallStatus 'Success' -ExitCode 0 -PhaseResults @()
+
+            Test-Path -LiteralPath $result | Should -BeTrue
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($result)
+            try {
+                $entryNames = @($zip.Entries | Select-Object -ExpandProperty FullName)
+                $entryNames | Should -Contain 'manifest.json'
+                $entryNames | Should -Contain 'WURepair.log'
+                $entryNames | Should -Contain 'WURepair-report.json'
+                $entryNames | Should -Contain 'logs/CBS.tail.log'
+                $entryNames | Should -Contain 'events/WURepair-Application.json'
+
+                $logEntry = $zip.GetEntry('WURepair.log')
+                $reader = New-Object System.IO.StreamReader($logEntry.Open())
+                try {
+                    $logContent = $reader.ReadToEnd()
+                }
+                finally {
+                    $reader.Dispose()
+                }
+
+                $logContent | Should -Not -Match 'Alice'
+                $logContent | Should -Not -Match 'DESKTOP-TEST'
+            }
+            finally {
+                $zip.Dispose()
+            }
+        }
+        finally {
+            $env:USERNAME = $originalUserName
+            $env:USERPROFILE = $originalUserProfile
+            $env:COMPUTERNAME = $originalComputerName
+        }
+    }
+
     It 'removes only blocking Microsoft entries from a temp hosts file' {
         $originalSystemRoot = $env:SystemRoot
         try {
@@ -308,6 +408,13 @@ Describe 'WURepair static contract' {
         Convert-WUSizeToMegabyte -SizeText '1.5 GB' | Should -Be 1536
         Convert-WUSizeToMegabyte -SizeText '512 KB' | Should -Be 0.5
         Convert-WUSizeToMegabyte -SizeText '1,5 GB' | Should -Be 1536
+    }
+
+    It 'computes SHA256 without requiring Get-FileHash' {
+        $hashTarget = Join-Path $TestDrive 'hash.txt'
+        Set-Content -LiteralPath $hashTarget -Value 'abc' -NoNewline
+
+        Get-WUFileSha256 -Path $hashTarget | Should -Be 'BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD'
     }
 
     It 'validates Catalog packages with Microsoft signature and SHA256 hash' {
