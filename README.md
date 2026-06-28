@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.9.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.10.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -52,6 +52,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **DISM Integration**: Repairs component store corruption
 - **Component Store Analysis**: Parses `DISM /AnalyzeComponentStore` and uses `/ResetBase` only when cleanup is recommended and reclaimable data is at least 1024 MB
 - **Servicing Stack Preflight**: Optional `-StageSSU` path downloads and installs an applicable Servicing Stack Update before DISM
+- **Catalog SSU Repair**: Optional `-RepairServicingStack` searches Microsoft Update Catalog, downloads the newest matching SSU `.msu`, and retries the next match if `wusa.exe` returns `0x800f0922`
 - **SFC Integration**: Scans and repairs system file integrity
 
 ### 📊 Diagnostics & Verification
@@ -77,7 +78,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.9.0
+    Windows Update Repair Tool v2.10.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -155,6 +156,7 @@ Run individual repair phases instead of the full pipeline:
 | `-RepairNetwork` | Only reset network stack |
 | `-RepairWaaS` | Only reset Update Orchestrator services and USO tasks |
 | `-RepairDelivery` | Only reset Delivery Optimization cache and download mode |
+| `-RepairServicingStack` | Only download and install a matching Microsoft Update Catalog SSU package |
 | `-RepairAll` | Run all phases (default when no switch given) |
 
 Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
@@ -182,6 +184,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Run DISM with Servicing Stack Update preflight
 .\WURepair.ps1 -RepairDISM -StageSSU
+
+# Repair Servicing Stack directly from Microsoft Update Catalog
+.\WURepair.ps1 -RepairServicingStack
 ```
 
 ## What Gets Fixed
@@ -271,7 +276,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.9.0 Flow                       │
+│                      WURepair v2.10.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -287,21 +292,22 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 │ 12. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
 │ 13. Reset Windows Update Agent                                  │
 │ 14. Optional SSU staging before DISM (-StageSSU)                │
-│ 15. Run DISM + analyzed component cleanup                      │
-│ 16. Run SFC (system file check)                                │
-│ 17. Start Update Services                                       │
-│ 18. Refresh Group Policy                                        │
-│ 19. Post-Repair Connectivity Test                               │
-│ 20. Post-Repair Verification (before/after comparison)          │
-│ 21. Trigger Update Scan                                         │
-│ 22. Write Event Log Summary                                     │
+│ 15. Optional Catalog SSU repair (-RepairServicingStack)         │
+│ 16. Run DISM + analyzed component cleanup                      │
+│ 17. Run SFC (system file check)                                │
+│ 18. Start Update Services                                       │
+│ 19. Refresh Group Policy                                        │
+│ 20. Post-Repair Connectivity Test                               │
+│ 21. Post-Repair Verification (before/after comparison)          │
+│ 22. Trigger Update Scan                                         │
+│ 23. Write Event Log Summary                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Privacy & Safety
 
 - ✅ **No data collection** - Everything runs locally
-- ✅ **No external downloads by default** - `-StageSSU` is opt-in and uses Windows Update Agent only
+- ✅ **No external downloads by default** - `-StageSSU` and `-RepairServicingStack` are opt-in update download paths
 - ✅ **Open source** - Full source code available for review
 - ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
 - ✅ **Restore point** - System restore point created automatically
@@ -316,6 +322,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.10.0
+- Added optional `-RepairServicingStack` Microsoft Update Catalog SSU repair path
+- Catalog repair downloads the newest matching SSU `.msu`, installs it with `wusa.exe /quiet /norestart`, and retries the next match on `0x800f0922`
 
 ### v2.9.0
 - Added `DISM /AnalyzeComponentStore` parsing before component cleanup
