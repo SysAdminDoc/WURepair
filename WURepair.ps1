@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.7.0 adds targeted Delivery Optimization repair.
     v2.6.0 adds targeted WaaS / Update Orchestrator repair.
     v2.5.0 adds WSUS/SUP posture diagnostics.
     v2.4.0 adds Microsoft Update Health Tools and remediation detection.
@@ -19,7 +20,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.6.0
+    Version: 2.7.0
 #>
 
 #Requires -RunAsAdministrator
@@ -35,7 +36,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.6.0'
+    Version        = '2.7.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -357,7 +358,8 @@ function Get-EstimatedRepairDuration {
         [bool]$RepairSFC,
         [bool]$RepairNetwork,
         [bool]$RepairStore,
-        [bool]$RepairWaaS
+        [bool]$RepairWaaS,
+        [bool]$RepairDelivery
     )
 
     $minMinutes = if ($SelectiveMode) { 4 } else { 10 }
@@ -372,6 +374,10 @@ function Get-EstimatedRepairDuration {
         $maxMinutes += 3
     }
     if ($RepairWaaS) {
+        $minMinutes += 1
+        $maxMinutes += 3
+    }
+    if ($RepairDelivery) {
         $minMinutes += 1
         $maxMinutes += 3
     }
@@ -2504,6 +2510,101 @@ function Repair-WaaSOrchestrator {
     }
 }
 
+function Repair-DeliveryOptimization {
+    Write-Log "DELIVERY OPTIMIZATION - Resetting Cache and Download Mode Policy" -Level SECTION
+
+    $service = Get-Service -Name 'dosvc' -ErrorAction SilentlyContinue
+    $wasRunning = ($service -and $service.Status -eq 'Running')
+
+    if ($service -and $service.Status -eq 'Running') {
+        Write-Log "Stopping dosvc with sc.exe..."
+        $stopOutput = & sc.exe stop dosvc 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Wait-WUServiceState -ServiceName 'dosvc' -DesiredState 'Stopped' -TimeoutSeconds 20)) {
+            Write-Log "dosvc stopped" -Level SUCCESS
+        }
+        else {
+            Write-Log "Could not confirm dosvc stopped: $($stopOutput -join ' ')" -Level WARNING
+        }
+    }
+
+    $cacheReset = $false
+    if (Get-Command -Name Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue) {
+        try {
+            Delete-DeliveryOptimizationCache -Force -ErrorAction Stop -WarningAction SilentlyContinue
+            Write-Log "Delivery Optimization cache cleared with Delete-DeliveryOptimizationCache" -Level SUCCESS
+            $cacheReset = $true
+        }
+        catch {
+            Write-Log "Delete-DeliveryOptimizationCache failed: $($_.Exception.Message)" -Level WARNING
+        }
+    }
+
+    $cachePath = "$env:SystemRoot\SoftwareDistribution\DeliveryOptimization"
+    if (-not $cacheReset) {
+        if (Test-Path -LiteralPath $cachePath) {
+            $backupPath = "$cachePath.bak.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+            try {
+                Move-Item -LiteralPath $cachePath -Destination $backupPath -Force -ErrorAction Stop
+                Write-Log "Delivery Optimization cache moved to: $backupPath" -Level SUCCESS
+            }
+            catch {
+                Write-Log "Could not move Delivery Optimization cache: $($_.Exception.Message)" -Level WARNING
+                try {
+                    Get-ChildItem -LiteralPath $cachePath -Force -ErrorAction Stop |
+                        Remove-Item -Recurse -Force -ErrorAction Stop
+                    Write-Log "Delivery Optimization cache contents removed" -Level SUCCESS
+                }
+                catch {
+                    Write-Log "Could not clear Delivery Optimization cache contents: $($_.Exception.Message)" -Level WARNING
+                }
+            }
+        }
+        else {
+            Write-Log "Delivery Optimization cache folder not found; it will be recreated" -Level INFO
+        }
+
+        try {
+            New-Item -Path $cachePath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            Write-Log "Delivery Optimization cache folder ready" -Level SUCCESS
+        }
+        catch {
+            Write-Log "Could not recreate Delivery Optimization cache folder: $($_.Exception.Message)" -Level WARNING
+        }
+    }
+
+    $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
+    $modeValues = @('DODownloadMode', 'DeliveryOptimizationDownloadMode')
+    foreach ($modeValue in $modeValues) {
+        try {
+            if (Test-Path -LiteralPath $policyPath) {
+                $currentValue = Get-WURegistryValue -Path $policyPath -Name $modeValue
+                if ($null -ne $currentValue) {
+                    Remove-ItemProperty -LiteralPath $policyPath -Name $modeValue -Force -ErrorAction Stop
+                    Write-Log "Removed Delivery Optimization policy value: $modeValue" -Level SUCCESS
+                }
+            }
+        }
+        catch {
+            Write-Log "Could not remove Delivery Optimization policy value ${modeValue}: $($_.Exception.Message)" -Level WARNING
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $policyPath)) {
+        Write-Log "No Delivery Optimization policy key found" -Level SUCCESS
+    }
+
+    if ($service -and ($wasRunning -or $service.Status -ne 'Running')) {
+        Write-Log "Starting dosvc with sc.exe..."
+        $startOutput = & sc.exe start dosvc 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Wait-WUServiceState -ServiceName 'dosvc' -DesiredState 'Running' -TimeoutSeconds 20)) {
+            Write-Log "dosvc running" -Level SUCCESS
+        }
+        else {
+            Write-Log "Could not confirm dosvc running: $($startOutput -join ' ')" -Level WARNING
+        }
+    }
+}
+
 function Update-GroupPolicy {
     Write-Log "POLICY - Refreshing Group Policy" -Level SECTION
 
@@ -2684,6 +2785,7 @@ function Start-WURepair {
         [switch]$RepairSFC,
         [switch]$RepairNetwork,
         [switch]$RepairWaaS,
+        [switch]$RepairDelivery,
         [switch]$RepairAll
     )
 
@@ -2699,7 +2801,7 @@ function Start-WURepair {
     Initialize-EventSource
 
     # Determine selective mode: if no specific -Repair* switch given, run all
-    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS)
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery)
     if ($RepairAll -or (-not $selectiveMode)) {
         # Full repair mode
         $RepairServices = $true
@@ -2709,6 +2811,7 @@ function Start-WURepair {
         $RepairSFC      = $true
         $RepairNetwork  = $true
         $RepairWaaS     = $true
+        $RepairDelivery = $true
         $selectiveMode  = $false
     }
 
@@ -2744,19 +2847,20 @@ function Start-WURepair {
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to repair protected Windows files.' }
         if ($RepairNetwork) { $plannedSteps += 'Reset Winsock and key network update paths.' }
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
+        if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
     }
     else {
         $plannedSteps += @(
             'Clean Microsoft update blocks from the hosts file and restore key TLS settings.'
             'Repair firewall rules, service dependencies, and Windows Update blocking policies.'
             'Stop update-related services, refresh their configuration, and rebuild update caches.'
-            'Re-register update DLLs, reset network components, clean registry state, and refresh Update Orchestrator.'
+            'Re-register update DLLs, reset network and Delivery Optimization components, clean registry state, and refresh Update Orchestrator.'
         )
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
     }
 
-    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS
+    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery
     $backupMode = if ($RepairStore) {
         if (-not $SkipBackup -and $Script:Config.CreateBackup) { 'Enabled before cache reset' } else { 'Skipped for cache reset' }
     }
@@ -2847,6 +2951,9 @@ function Start-WURepair {
     }
     if ($RepairNetwork) {
         $phases += @{ Name = 'Reset Network Stack';        Action = { Reset-WinsockCatalog } }
+    }
+    if ($RepairDelivery) {
+        $phases += @{ Name = 'Reset Delivery Optimization'; Action = { Repair-DeliveryOptimization } }
     }
     if ($RepairWaaS) {
         $phases += @{ Name = 'Reset WaaS Orchestrator';    Action = { Repair-WaaSOrchestrator } }
@@ -2970,6 +3077,7 @@ function Show-Help {
         '-RepairSFC       Run System File Checker only.',
         '-RepairNetwork   Reset network stack and update connectivity paths.',
         '-RepairWaaS      Reset Update Orchestrator services and USO tasks.',
+        '-RepairDelivery  Reset Delivery Optimization cache and download mode.',
         '-RepairAll       Force the full repair flow.'
     )
 
@@ -3004,6 +3112,7 @@ if ($args -contains '-RepairDISM') { $params['RepairDISM'] = $true }
 if ($args -contains '-RepairSFC') { $params['RepairSFC'] = $true }
 if ($args -contains '-RepairNetwork') { $params['RepairNetwork'] = $true }
 if ($args -contains '-RepairWaaS') { $params['RepairWaaS'] = $true }
+if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
