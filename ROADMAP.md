@@ -63,13 +63,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 
 ## Research-Driven Additions
 
-- [ ] P1 - Add a mutation journal and rollback helper for destructive repairs
-  Why: Backups exist, but operators need a single machine-readable record of every hosts, registry, cache, and policy mutation and how to reverse it.
-  Evidence: `WURepair.ps1:1700`, `WURepair.ps1:1918`, `WURepair.ps1:2284`, `WURepair.ps1:2385`; Microsoft troubleshooting docs emphasize reversible repair steps.
-  Touches: hosts repair, policy repair, cache reset, registry reset, JSON report schema, log output.
-  Acceptance: Each mutation appends before/after metadata to a run journal; `-RollbackJournal <path>` previews and applies reversible changes without guessing from text logs.
-  Complexity: L
-
 - [ ] P1 - Verify Catalog downloads before installing SSU packages
   Why: The Catalog repair path downloads elevated installers and should verify signature/catalog/hash before invoking `wusa.exe`.
   Evidence: `WURepair.ps1:2931`, `WURepair.ps1:2941`; Microsoft `about_Signing`; `Test-FileCatalog` docs.

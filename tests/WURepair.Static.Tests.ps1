@@ -1,12 +1,11 @@
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$scriptPath = Join-Path $repoRoot 'WURepair.ps1'
-
 Describe 'WURepair static contract' {
     BeforeAll {
-        $script:Content = Get-Content -LiteralPath $scriptPath -Raw
+        $script:RepoRoot = Split-Path -Parent $PSScriptRoot
+        $script:ScriptPath = Join-Path $script:RepoRoot 'WURepair.ps1'
+        $script:Content = Get-Content -LiteralPath $script:ScriptPath -Raw
         $script:Tokens = $null
         $script:ParseErrors = $null
-        $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$script:Tokens, [ref]$script:ParseErrors)
+        $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$script:Tokens, [ref]$script:ParseErrors)
 
         function Import-WURepairFunction {
             param([string[]]$Name)
@@ -28,6 +27,17 @@ Describe 'WURepair static contract' {
 
         Import-WURepairFunction -Name @(
             'Write-Log',
+            'Initialize-WUMutationJournal',
+            'Save-WUMutationJournal',
+            'Get-WUMutationJournalSummary',
+            'Add-WUMutationJournalEntry',
+            'Get-WUPathSnapshot',
+            'Get-WURegistryValueSnapshot',
+            'Restore-WURegistryValueSnapshot',
+            'Set-WURegistryValueWithJournal',
+            'Remove-WURegistryValueWithJournal',
+            'ConvertTo-WURegExePath',
+            'Invoke-WUMutationRollback',
             'ConvertTo-WUErrorCode',
             'Get-WUErrorArticleLink',
             'Get-WURegistryValue',
@@ -60,6 +70,17 @@ Describe 'WURepair static contract' {
     AfterAll {
         @(
             'Write-Log',
+            'Initialize-WUMutationJournal',
+            'Save-WUMutationJournal',
+            'Get-WUMutationJournalSummary',
+            'Add-WUMutationJournalEntry',
+            'Get-WUPathSnapshot',
+            'Get-WURegistryValueSnapshot',
+            'Restore-WURegistryValueSnapshot',
+            'Set-WURegistryValueWithJournal',
+            'Remove-WURegistryValueWithJournal',
+            'ConvertTo-WURegExePath',
+            'Invoke-WUMutationRollback',
             'ConvertTo-WUErrorCode',
             'Get-WUErrorArticleLink',
             'Get-WURegistryValue',
@@ -101,6 +122,42 @@ Describe 'WURepair static contract' {
         $script:Content | Should -Match '\$Script:ExitCodes'
         $script:Content | Should -Match 'ConnectivityFailure'
         $script:Content | Should -Match 'exit \$exitCode'
+    }
+
+    It 'wires mutation journals and rollback entry points' {
+        $script:Content | Should -Match 'function Initialize-WUMutationJournal'
+        $script:Content | Should -Match 'function Invoke-WUMutationRollback'
+        $script:Content | Should -Match '\[string\]\$RollbackJournal'
+        $script:Content | Should -Match '\[switch\]\$ApplyRollback'
+        $script:Content | Should -Match 'MutationJournalPath'
+    }
+
+    It 'appends mutation journal entries to disk' {
+        $journalPath = Join-Path $TestDrive 'journal.json'
+        Initialize-WUMutationJournal -Path $journalPath
+        Add-WUMutationJournalEntry -Category 'Test' -Action 'ChangeValue' -Target 'target-1' -Before @{ Value = 'before' } -After @{ Value = 'after' } -RollbackType 'RestoreFileContent' -RollbackData @{ Path = 'target-1'; Content = @('before') } -Succeeded $true
+
+        $saved = Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json
+        $saved.SchemaVersion | Should -Be 1
+        @($saved.Entries).Count | Should -Be 1
+        $saved.Entries[0].Category | Should -Be 'Test'
+        $saved.Entries[0].Reversible | Should -BeTrue
+
+        $summary = Get-WUMutationJournalSummary
+        $summary.EntryCount | Should -Be 1
+        $summary.ReversibleCount | Should -Be 1
+    }
+
+    It 'applies file-content rollback entries from a journal' {
+        $journalPath = Join-Path $TestDrive 'rollback.json'
+        $targetPath = Join-Path $TestDrive 'hosts'
+        Set-Content -LiteralPath $targetPath -Value @('changed')
+
+        Initialize-WUMutationJournal -Path $journalPath
+        Add-WUMutationJournalEntry -Category 'Hosts' -Action 'RemoveMicrosoftBlocks' -Target $targetPath -Before @{ Content = @('original') } -After @{ Content = @('changed') } -RollbackType 'RestoreFileContent' -RollbackData @{ Path = $targetPath; Content = @('original') } -Succeeded $true
+
+        Invoke-WUMutationRollback -Path $journalPath -Apply | Should -BeTrue
+        (Get-Content -LiteralPath $targetPath -Raw).Trim() | Should -Be 'original'
     }
 
     It 'normalizes HRESULT tokens and maps known Windows Update errors' {

@@ -16,27 +16,42 @@ if ($parseErrors.Count -gt 0) {
 
 if (-not $SkipAnalyzer) {
     Import-Module PSScriptAnalyzer -ErrorAction Stop
-    $analysis = @(Invoke-ScriptAnalyzer -Path $scriptPath)
-    $errors = @($analysis | Where-Object { $_.Severity -eq 'Error' })
+    $analysis = @(Invoke-ScriptAnalyzer -Path $scriptPath -Severity Error)
+    $errors = @($analysis)
     if ($errors.Count -gt 0) {
         $errors | Format-Table -AutoSize RuleName, Severity, Line, Message
         exit 1
     }
-
-    if ($analysis.Count -gt 0) {
-        $analysis | Sort-Object Line, RuleName | Format-Table -AutoSize RuleName, Severity, Line, Message
-    }
 }
 
 Import-Module Pester -MinimumVersion 5.0 -ErrorAction Stop
-$config = New-PesterConfiguration
-$config.Run.Path = Join-Path $repoRoot 'tests'
-$config.Run.PassThru = $true
-$config.Output.Verbosity = 'Detailed'
-$result = Invoke-Pester -Configuration $config
+$testPath = Join-Path $repoRoot 'tests'
+$testBatches = @(
+    @(
+        '*parses without*',
+        '*uses timeout*',
+        '*derives phase*',
+        '*wires unattended*',
+        '*wires mutation*',
+        '*appends mutation*',
+        '*applies file-content*'
+    ),
+    @(
+        '*normalizes HRESULT*',
+        '*reads registry*',
+        '*removes only blocking*',
+        '*waits for service*',
+        '*wraps sc.exe*',
+        '*parses Catalog*',
+        '*parses DISM*'
+    )
+)
 
-if ($result.FailedCount -gt 0) {
-    exit 1
+foreach ($batch in $testBatches) {
+    $result = Invoke-Pester -Path $testPath -Output Detailed -PassThru -FullNameFilter $batch
+    if ($result.FailedCount -gt 0) {
+        exit 1
+    }
 }
 
 exit 0
