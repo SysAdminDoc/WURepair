@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.11.0 adds optional JSON repair reports for RMM ingestion.
     v2.10.0 adds Microsoft Update Catalog SSU repair fallback.
     v2.9.0 adds component store analysis before DISM cleanup.
     v2.8.0 adds optional Servicing Stack Update staging before DISM.
@@ -23,7 +24,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.10.0
+    Version: 2.11.0
 #>
 
 #Requires -RunAsAdministrator
@@ -39,7 +40,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.10.0'
+    Version                            = '2.11.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -3425,6 +3426,103 @@ function Show-BeforeAfterComparison {
     }
 }
 
+function Get-DiagnosticReportDelta {
+    param(
+        [hashtable]$Before,
+        [hashtable]$After
+    )
+
+    $serviceChanges = @()
+    $beforeServices = @($Before['Services'])
+    $afterServices = @($After['Services'])
+    foreach ($beforeService in $beforeServices) {
+        $afterService = $afterServices | Where-Object { $_.Component -eq $beforeService.Component } | Select-Object -First 1
+        if ($afterService -and [string]$beforeService.Status -ne [string]$afterService.Status) {
+            $serviceChanges += [PSCustomObject]@{
+                Component = [string]$beforeService.Component
+                Before    = [string]$beforeService.Status
+                After     = [string]$afterService.Status
+            }
+        }
+    }
+
+    $changedFields = @()
+    $keys = (@($Before.Keys) + @($After.Keys)) | Sort-Object -Unique
+    foreach ($key in $keys) {
+        if ($key -eq 'Services') {
+            continue
+        }
+
+        $beforeValue = if ($Before.ContainsKey($key)) { [string]$Before[$key] } else { $null }
+        $afterValue = if ($After.ContainsKey($key)) { [string]$After[$key] } else { $null }
+        if ($beforeValue -ne $afterValue) {
+            $changedFields += [PSCustomObject]@{
+                Key    = [string]$key
+                Before = $beforeValue
+                After  = $afterValue
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        ServiceChanges = $serviceChanges
+        ChangedFields  = $changedFields
+    }
+}
+
+function Write-JsonRepairReport {
+    param(
+        [string]$Path,
+        [datetime]$StartTime,
+        [datetime]$EndTime,
+        [timespan]$Duration,
+        [string]$ModeLabel,
+        [bool]$SelectiveMode,
+        [hashtable]$PreReport,
+        [hashtable]$PostReport,
+        [bool]$PostConnectivity,
+        [array]$PhaseResults,
+        [hashtable]$Options
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    try {
+        $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        $parent = Split-Path -Path $resolvedPath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($parent)) {
+            New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+
+        $reportObject = [ordered]@{
+            SchemaVersion          = '1.0'
+            Tool                   = 'WURepair'
+            Version                = $Script:Config.Version
+            StartedAt              = $StartTime.ToString('o')
+            EndedAt                = $EndTime.ToString('o')
+            DurationSeconds        = [math]::Round($Duration.TotalSeconds, 2)
+            Mode                   = $ModeLabel
+            SelectiveMode          = $SelectiveMode
+            Options                = $Options
+            LogPath                = $Script:Config.LogPath
+            PostRepairConnectivity = if ($PostConnectivity) { 'AllEndpointsReachable' } else { 'SomeEndpointsUnreachable' }
+            PhaseResults           = $PhaseResults
+            Delta                  = Get-DiagnosticReportDelta -Before $PreReport -After $PostReport
+            PreRepair              = $PreReport
+            PostRepair             = $PostReport
+        }
+
+        $json = $reportObject | ConvertTo-Json -Depth 10
+        Set-Content -LiteralPath $resolvedPath -Value $json -Encoding UTF8 -Force
+        Write-Log "JSON report written to: $resolvedPath" -Level SUCCESS
+    }
+    catch {
+        Write-Log "Could not write JSON report '$Path': $($_.Exception.Message)" -Level WARNING
+    }
+}
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -3445,7 +3543,8 @@ function Start-WURepair {
         [switch]$RepairDelivery,
         [switch]$RepairServicingStack,
         [switch]$StageSSU,
-        [switch]$RepairAll
+        [switch]$RepairAll,
+        [string]$JsonReport
     )
 
     Show-Banner
@@ -3516,6 +3615,7 @@ function Start-WURepair {
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
         if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
+        if (-not [string]::IsNullOrWhiteSpace($JsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $JsonReport." }
     }
     else {
         $plannedSteps += @(
@@ -3529,6 +3629,7 @@ function Start-WURepair {
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
+        if (-not [string]::IsNullOrWhiteSpace($JsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $JsonReport." }
     }
 
     $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery -RepairServicingStack $RepairServicingStack -StageSSU $StageSSU
@@ -3549,6 +3650,9 @@ function Start-WURepair {
     Write-UiMetric -Label 'Restore point' -Value $restorePointMode -Tone $(if ($selectiveMode) { 'Info' } else { 'Success' })
     Write-UiMetric -Label 'Connectivity' -Value $connectivityLabel -Tone $(if ($connectivity) { 'Success' } else { 'Warning' })
     Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
+    if (-not [string]::IsNullOrWhiteSpace($JsonReport)) {
+        Write-UiMetric -Label 'JSON report' -Value $JsonReport -Tone 'Info'
+    }
 
     Write-UiList -Title 'Planned work' -Items $plannedSteps
 
@@ -3650,15 +3754,26 @@ function Start-WURepair {
 
     $totalPhases = $phases.Count
     $currentPhase = 0
+    $phaseResults = @()
 
     foreach ($phase in $phases) {
         $currentPhase++
         $pct = [int](($currentPhase / $totalPhases) * 100)
+        $phaseStart = Get-Date
         Write-Progress -Activity "WURepair v$($Script:Config.Version)" `
             -Status "Phase $currentPhase of $totalPhases : $($phase.Name)" `
             -PercentComplete $pct
         Write-Log "--- Phase $currentPhase of $totalPhases : $($phase.Name) ---"
         & $phase.Action
+        $phaseEnd = Get-Date
+        $phaseResults += [PSCustomObject]@{
+            Index           = $currentPhase
+            Name            = $phase.Name
+            Status          = 'Completed'
+            StartedAt       = $phaseStart.ToString('o')
+            EndedAt         = $phaseEnd.ToString('o')
+            DurationSeconds = [math]::Round(($phaseEnd - $phaseStart).TotalSeconds, 2)
+        }
     }
 
     Write-Progress -Activity "WURepair v$($Script:Config.Version)" -Completed
@@ -3688,6 +3803,25 @@ function Start-WURepair {
     )
     $summaryText = $summaryLines -join "`r`n"
     Write-RepairEventLog -Message $summaryText -EventId 1001
+
+    $reportOptions = @{
+        QuickMode             = [bool]$QuickMode
+        SkipDISM              = [bool]$SkipDISM
+        SkipSFC               = [bool]$SkipSFC
+        SkipBackup            = [bool]$SkipBackup
+        RepairServices        = [bool]$RepairServices
+        RepairDLLs            = [bool]$RepairDLLs
+        RepairStore           = [bool]$RepairStore
+        RepairDISM            = [bool]$RepairDISM
+        RepairSFC             = [bool]$RepairSFC
+        RepairNetwork         = [bool]$RepairNetwork
+        RepairWaaS            = [bool]$RepairWaaS
+        RepairDelivery        = [bool]$RepairDelivery
+        RepairServicingStack  = [bool]$RepairServicingStack
+        StageSSU              = [bool]$StageSSU
+        RepairAll             = [bool]$RepairAll
+    }
+    Write-JsonRepairReport -Path $JsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions
 
     # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
@@ -3744,6 +3878,7 @@ function Show-Help {
         '-SkipSFC              Skip only System File Checker.',
         '-SkipBackup           Skip extra cache folder backups before reset.',
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
+        '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
         '-Help                 Show this help screen.'
     )
 
@@ -3766,6 +3901,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairServices',
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
         '.\WURepair.ps1 -RepairDISM -StageSSU',
+        '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -SkipDISM'
     )
 
@@ -3778,6 +3914,28 @@ function Show-Help {
 # ============================================================================
 # COMMAND LINE INTERFACE
 # ============================================================================
+
+function Get-CommandLineOptionValue {
+    param(
+        [string[]]$Arguments,
+        [string]$Name
+    )
+
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $argument = [string]$Arguments[$i]
+        if ($argument -like "$Name=*") {
+            return $argument.Substring($Name.Length + 1)
+        }
+        if ($argument -eq $Name) {
+            if ($i + 1 -ge $Arguments.Count -or [string]$Arguments[$i + 1] -like '-*') {
+                throw "$Name requires a path value."
+            }
+            return [string]$Arguments[$i + 1]
+        }
+    }
+
+    return $null
+}
 
 $params = @{}
 
@@ -3796,6 +3954,9 @@ if ($args -contains '-RepairWaaS') { $params['RepairWaaS'] = $true }
 if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
 if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
+
+$jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
+if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
     Show-Help

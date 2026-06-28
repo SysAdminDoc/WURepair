@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.10.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.11.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -64,6 +64,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
+- **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
 - **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
 - **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`, `-RepairWaaS`, `-RepairDelivery`
@@ -78,7 +79,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.10.0
+    Windows Update Repair Tool v2.11.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -140,6 +141,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipSFC` | Skip only System File Checker |
 | `-SkipBackup` | Skip backup of Windows Update folders |
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
+| `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
 | `-Help` | Display help information |
 
 ### Selective Repair Switches
@@ -187,6 +189,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Repair Servicing Stack directly from Microsoft Update Catalog
 .\WURepair.ps1 -RepairServicingStack
+
+# Full repair with RMM-readable JSON report
+.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json
 ```
 
 ## What Gets Fixed
@@ -276,7 +281,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.10.0 Flow                      │
+│                      WURepair v2.11.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -300,7 +305,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 │ 20. Post-Repair Connectivity Test                               │
 │ 21. Post-Repair Verification (before/after comparison)          │
 │ 22. Trigger Update Scan                                         │
-│ 23. Write Event Log Summary                                     │
+│ 23. Write Event Log Summary / optional JSON report              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -322,6 +327,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.11.0
+- Added optional `-JsonReport <path>` output for RMM ingestion
+- JSON reports include run metadata, options, phase results, pre/post diagnostics, changed fields, and service deltas
 
 ### v2.10.0
 - Added optional `-RepairServicingStack` Microsoft Update Catalog SSU repair path
