@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.8.0 adds optional Servicing Stack Update staging before DISM.
     v2.7.0 adds targeted Delivery Optimization repair.
     v2.6.0 adds targeted WaaS / Update Orchestrator repair.
     v2.5.0 adds WSUS/SUP posture diagnostics.
@@ -20,7 +21,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.7.0
+    Version: 2.8.0
 #>
 
 #Requires -RunAsAdministrator
@@ -36,7 +37,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.7.0'
+    Version        = '2.8.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -359,7 +360,8 @@ function Get-EstimatedRepairDuration {
         [bool]$RepairNetwork,
         [bool]$RepairStore,
         [bool]$RepairWaaS,
-        [bool]$RepairDelivery
+        [bool]$RepairDelivery,
+        [bool]$StageSSU
     )
 
     $minMinutes = if ($SelectiveMode) { 4 } else { 10 }
@@ -380,6 +382,10 @@ function Get-EstimatedRepairDuration {
     if ($RepairDelivery) {
         $minMinutes += 1
         $maxMinutes += 3
+    }
+    if ($StageSSU -and $RepairDISM) {
+        $minMinutes += 5
+        $maxMinutes += 20
     }
     if ($RepairDISM) {
         $minMinutes += 15
@@ -2613,6 +2619,163 @@ function Update-GroupPolicy {
     Write-Log "Group Policy refreshed" -Level SUCCESS
 }
 
+function Get-WUOperationResultName {
+    param(
+        [int]$ResultCode
+    )
+
+    switch ($ResultCode) {
+        0 { return 'NotStarted' }
+        1 { return 'InProgress' }
+        2 { return 'Succeeded' }
+        3 { return 'SucceededWithErrors' }
+        4 { return 'Failed' }
+        5 { return 'Aborted' }
+        default { return "Unknown ($ResultCode)" }
+    }
+}
+
+function Get-WUUpdateKbText {
+    param(
+        [object]$Update
+    )
+
+    try {
+        $kbIds = @($Update.KBArticleIDs) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        if ($kbIds.Count -gt 0) {
+            return (($kbIds | ForEach-Object { "KB$_" }) -join ', ')
+        }
+    }
+    catch {
+        Write-Log "Could not read update KB article IDs: $($_.Exception.Message)" -Level WARNING
+    }
+
+    return 'No KB listed'
+}
+
+function Invoke-ServicingStackPreflight {
+    Write-Log "SERVICING STACK - Staging Latest Applicable SSU" -Level SECTION
+
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
+        $searcher = $session.CreateUpdateSearcher()
+        Write-Log "Searching Windows Update Agent for applicable Servicing Stack updates..."
+        $searchResult = $searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
+    }
+    catch {
+        Write-Log "Could not query Windows Update Agent for Servicing Stack updates: $($_.Exception.Message)" -Level WARNING
+        return
+    }
+
+    $servicingUpdates = @()
+    for ($i = 0; $i -lt $searchResult.Updates.Count; $i++) {
+        $update = $searchResult.Updates.Item($i)
+        $title = [string]$update.Title
+        if ($title -notmatch '(?i)\b(servicing stack|servicing stack update|ssu)\b') {
+            continue
+        }
+
+        $lastDeployment = [datetime]::MinValue
+        try {
+            if ($null -ne $update.LastDeploymentChangeTime) {
+                $lastDeployment = [datetime]$update.LastDeploymentChangeTime
+            }
+        }
+        catch {
+            Write-Log "Could not read SSU deployment date for '$title': $($_.Exception.Message)" -Level WARNING
+        }
+
+        $servicingUpdates += [PSCustomObject]@{
+            Update                   = $update
+            Title                    = $title
+            KBText                   = Get-WUUpdateKbText -Update $update
+            LastDeploymentChangeTime = $lastDeployment
+            IsDownloaded             = [bool]$update.IsDownloaded
+        }
+    }
+
+    if ($servicingUpdates.Count -eq 0) {
+        Write-Log "No applicable Servicing Stack Update was offered by Windows Update Agent" -Level SUCCESS
+        return
+    }
+
+    $selected = $servicingUpdates | Sort-Object LastDeploymentChangeTime, Title -Descending | Select-Object -First 1
+    if ($servicingUpdates.Count -gt 1) {
+        Write-Log "Found $($servicingUpdates.Count) applicable Servicing Stack updates; selecting the latest deployment date" -Level INFO
+    }
+    Write-Log "Selected SSU: $($selected.Title) ($($selected.KBText))" -Level INFO
+
+    try {
+        if ($selected.Update.EulaAccepted -eq $false) {
+            $selected.Update.AcceptEula()
+            Write-Log "Accepted SSU EULA through Windows Update Agent" -Level INFO
+        }
+    }
+    catch {
+        Write-Log "Could not accept SSU EULA: $($_.Exception.Message)" -Level WARNING
+    }
+
+    try {
+        $updatesToProcess = New-Object -ComObject Microsoft.Update.UpdateColl -ErrorAction Stop
+        [void]$updatesToProcess.Add($selected.Update)
+    }
+    catch {
+        Write-Log "Could not create Windows Update collection for SSU staging: $($_.Exception.Message)" -Level WARNING
+        return
+    }
+
+    if (-not $selected.Update.IsDownloaded) {
+        try {
+            Write-Log "Downloading selected SSU through Windows Update Agent..."
+            $downloader = $session.CreateUpdateDownloader()
+            $downloader.Updates = $updatesToProcess
+            $downloadResult = $downloader.Download()
+            $downloadStatus = Get-WUOperationResultName -ResultCode ([int]$downloadResult.ResultCode)
+            if ([int]$downloadResult.ResultCode -in @(2, 3)) {
+                Write-Log "SSU download result: $downloadStatus" -Level SUCCESS
+            }
+            else {
+                Write-Log "SSU download result: $downloadStatus" -Level WARNING
+                return
+            }
+        }
+        catch {
+            Write-Log "Could not download selected SSU: $($_.Exception.Message)" -Level WARNING
+            return
+        }
+    }
+    else {
+        Write-Log "Selected SSU is already downloaded in the Windows Update cache" -Level SUCCESS
+    }
+
+    try {
+        Write-Log "Installing selected SSU before DISM RestoreHealth..."
+        $installer = $session.CreateUpdateInstaller()
+        $installer.Updates = $updatesToProcess
+        $installer.AllowSourcePrompts = $false
+        $installer.ForceQuiet = $true
+        $installResult = $installer.Install()
+        $installStatus = Get-WUOperationResultName -ResultCode ([int]$installResult.ResultCode)
+
+        if ([int]$installResult.ResultCode -eq 2) {
+            Write-Log "SSU install result: $installStatus" -Level SUCCESS
+        }
+        elseif ([int]$installResult.ResultCode -eq 3) {
+            Write-Log "SSU install result: $installStatus" -Level WARNING
+        }
+        else {
+            Write-Log "SSU install result: $installStatus" -Level WARNING
+        }
+
+        if ($installResult.RebootRequired) {
+            Write-Log "SSU installation requested a restart; DISM will continue, but reboot after repair is important" -Level WARNING
+        }
+    }
+    catch {
+        Write-Log "Could not install selected SSU: $($_.Exception.Message)" -Level WARNING
+    }
+}
+
 function Invoke-DISM {
     Write-Log "DISM - Running System Image Repairs" -Level SECTION
 
@@ -2786,6 +2949,7 @@ function Start-WURepair {
         [switch]$RepairNetwork,
         [switch]$RepairWaaS,
         [switch]$RepairDelivery,
+        [switch]$StageSSU,
         [switch]$RepairAll
     )
 
@@ -2843,7 +3007,15 @@ function Start-WURepair {
                 'Reset SoftwareDistribution / catroot2 without creating an extra folder backup.'
             }
         }
-        if ($RepairDISM) { $plannedSteps += 'Run DISM to inspect and repair the component store.' }
+        if ($RepairDISM) {
+            if ($StageSSU) {
+                $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.'
+            }
+            $plannedSteps += 'Run DISM to inspect and repair the component store.'
+        }
+        elseif ($StageSSU) {
+            $plannedSteps += 'SSU staging was requested, but it will be skipped because DISM is not running.'
+        }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to repair protected Windows files.' }
         if ($RepairNetwork) { $plannedSteps += 'Reset Winsock and key network update paths.' }
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
@@ -2856,11 +3028,13 @@ function Start-WURepair {
             'Stop update-related services, refresh their configuration, and rebuild update caches.'
             'Re-register update DLLs, reset network and Delivery Optimization components, clean registry state, and refresh Update Orchestrator.'
         )
+        if ($RepairDISM -and $StageSSU) { $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.' }
+        elseif ($StageSSU) { $plannedSteps += 'SSU staging was requested, but it will be skipped because DISM is not running.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
     }
 
-    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery
+    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery -StageSSU $StageSSU
     $backupMode = if ($RepairStore) {
         if (-not $SkipBackup -and $Script:Config.CreateBackup) { 'Enabled before cache reset' } else { 'Skipped for cache reset' }
     }
@@ -2957,6 +3131,9 @@ function Start-WURepair {
     }
     if ($RepairWaaS) {
         $phases += @{ Name = 'Reset WaaS Orchestrator';    Action = { Repair-WaaSOrchestrator } }
+    }
+    if ($RepairDISM -and $StageSSU) {
+        $phases += @{ Name = 'Stage Servicing Stack';       Action = { Invoke-ServicingStackPreflight } }
     }
     if ($RepairDISM) {
         $phases += @{ Name = 'DISM Repairs';               Action = { Invoke-DISM } }
@@ -3066,6 +3243,7 @@ function Show-Help {
         '-SkipDISM             Skip only DISM component store repair.',
         '-SkipSFC              Skip only System File Checker.',
         '-SkipBackup           Skip extra cache folder backups before reset.',
+        '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
         '-Help                 Show this help screen.'
     )
 
@@ -3086,6 +3264,7 @@ function Show-Help {
         '.\WURepair.ps1 -Quick',
         '.\WURepair.ps1 -RepairServices',
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
+        '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -SkipDISM'
     )
 
@@ -3104,6 +3283,7 @@ $params = @{}
 if ($args -contains '-SkipDISM') { $params['SkipDISM'] = $true }
 if ($args -contains '-SkipSFC') { $params['SkipSFC'] = $true }
 if ($args -contains '-SkipBackup') { $params['SkipBackup'] = $true }
+if ($args -contains '-StageSSU' -or $args -contains '-StageServicingStack') { $params['StageSSU'] = $true }
 if ($args -contains '-QuickMode' -or $args -contains '-Quick') { $params['QuickMode'] = $true }
 if ($args -contains '-RepairServices') { $params['RepairServices'] = $true }
 if ($args -contains '-RepairDLLs') { $params['RepairDLLs'] = $true }

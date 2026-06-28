@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.7.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.8.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -50,6 +50,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Catroot2 Reset**: Clears cryptographic catalog cache
 - **DLL Re-registration**: Re-registers 35+ Windows Update DLLs
 - **DISM Integration**: Repairs component store corruption
+- **Servicing Stack Preflight**: Optional `-StageSSU` path downloads and installs an applicable Servicing Stack Update before DISM
 - **SFC Integration**: Scans and repairs system file integrity
 
 ### 📊 Diagnostics & Verification
@@ -63,7 +64,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
 - **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
-- **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`
+- **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`, `-RepairWaaS`, `-RepairDelivery`
 
 ## Screenshots
 
@@ -75,7 +76,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.7.0
+    Windows Update Repair Tool v2.8.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -136,6 +137,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipDISM` | Skip only DISM component store repair |
 | `-SkipSFC` | Skip only System File Checker |
 | `-SkipBackup` | Skip backup of Windows Update folders |
+| `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
 | `-Help` | Display help information |
 
 ### Selective Repair Switches
@@ -176,6 +178,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Reset data stores + re-register DLLs
 .\WURepair.ps1 -RepairStore -RepairDLLs
+
+# Run DISM with Servicing Stack Update preflight
+.\WURepair.ps1 -RepairDISM -StageSSU
 ```
 
 ## What Gets Fixed
@@ -265,7 +270,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.7.0 Flow                       │
+│                      WURepair v2.8.0 Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -280,21 +285,22 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 │ 11. Re-register DLLs (35+ Windows Update DLLs)                 │
 │ 12. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
 │ 13. Reset Windows Update Agent                                  │
-│ 14. Run DISM (component store repair)                          │
-│ 15. Run SFC (system file check)                                │
-│ 16. Start Update Services                                       │
-│ 17. Refresh Group Policy                                        │
-│ 18. Post-Repair Connectivity Test                               │
-│ 19. Post-Repair Verification (before/after comparison)          │
-│ 20. Trigger Update Scan                                         │
-│ 21. Write Event Log Summary                                     │
+│ 14. Optional SSU staging before DISM (-StageSSU)                │
+│ 15. Run DISM (component store repair)                          │
+│ 16. Run SFC (system file check)                                │
+│ 17. Start Update Services                                       │
+│ 18. Refresh Group Policy                                        │
+│ 19. Post-Repair Connectivity Test                               │
+│ 20. Post-Repair Verification (before/after comparison)          │
+│ 21. Trigger Update Scan                                         │
+│ 22. Write Event Log Summary                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Privacy & Safety
 
 - ✅ **No data collection** - Everything runs locally
-- ✅ **No external downloads** - Uses only built-in Windows tools
+- ✅ **No external downloads by default** - `-StageSSU` is opt-in and uses Windows Update Agent only
 - ✅ **Open source** - Full source code available for review
 - ✅ **Creates backups** - All changes can be reversed
 - ✅ **Restore point** - System restore point created automatically
@@ -309,6 +315,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.8.0
+- Added optional `-StageSSU` / `-StageServicingStack` preflight before DISM
+- Uses Windows Update Agent to find, download, and install the latest applicable Servicing Stack Update before `RestoreHealth`
 
 ### v2.7.0
 - Added `-RepairDelivery` to reset Delivery Optimization cache and stale download-mode policy values
