@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.12.0 adds unattended mode with automation exit codes.
     v2.11.0 adds optional JSON repair reports for RMM ingestion.
     v2.10.0 adds Microsoft Update Catalog SSU repair fallback.
     v2.9.0 adds component store analysis before DISM cleanup.
@@ -24,7 +25,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.11.0
+    Version: 2.12.0
 #>
 
 #Requires -RunAsAdministrator
@@ -40,10 +41,11 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.11.0'
+    Version                            = '2.12.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
+    Unattended                         = $false
     Ui                                 = @{
         AccentColor   = 'Cyan'
         TitleColor    = 'White'
@@ -144,6 +146,16 @@ $Script:WUErrorArticleMap = @{
 }
 $Script:WUTraceLogAttempted = $false
 $Script:WUTraceLogPath = $null
+$Script:CurrentPhaseTelemetry = $null
+$Script:LastRunExitCode = 0
+$Script:ExitCodes = @{
+    Success             = 0
+    Warnings            = 10
+    PhaseErrors         = 20
+    ConnectivityFailure = 30
+    NotAdministrator    = 40
+    Cancelled           = 50
+}
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -234,6 +246,8 @@ function Write-UiRule {
         [int]$Width = 0
     )
 
+    if ($Script:Config.Unattended) { return }
+
     if ($Width -le 0) {
         $Width = [Math]::Min(80, (Get-UiWidth) - ($Indent + 2))
     }
@@ -248,6 +262,8 @@ function Write-UiHeader {
         [string]$Tone = 'Section'
     )
 
+    if ($Script:Config.Unattended) { return }
+
     Write-Host ''
     Write-UiRule -Tone $Tone -Character '═'
     Write-Host ("  {0}" -f $Title) -ForegroundColor (Get-UiColor 'Title')
@@ -259,6 +275,8 @@ function Write-UiHeader {
 
 function Write-UiSubheading {
     param([string]$Title)
+
+    if ($Script:Config.Unattended) { return }
 
     Write-Host ''
     Write-Host ("  {0}" -f $Title) -ForegroundColor (Get-UiColor 'Title')
@@ -272,6 +290,8 @@ function Write-UiMetric {
         [string]$Tone = 'Info',
         [int]$LabelWidth = 28
     )
+
+    if ($Script:Config.Unattended) { return }
 
     $safeWidth = [Math]::Max(16, $LabelWidth)
     Write-Host ("  {0}" -f (Format-UiCell -Text $Label -Width $safeWidth)) -ForegroundColor (Get-UiColor 'Muted') -NoNewline
@@ -289,6 +309,8 @@ function Write-UiComparisonLine {
         [int]$BeforeWidth = 26
     )
 
+    if ($Script:Config.Unattended) { return }
+
     Write-Host ("  {0}" -f (Format-UiCell -Text $Label -Width $LabelWidth)) -ForegroundColor (Get-UiColor 'Muted') -NoNewline
     Write-Host '  ' -NoNewline
     Write-Host (Format-UiCell -Text $Before -Width $BeforeWidth) -ForegroundColor (Get-UiColor 'Info') -NoNewline
@@ -302,6 +324,8 @@ function Write-UiList {
         [string[]]$Items,
         [string]$Tone = 'Info'
     )
+
+    if ($Script:Config.Unattended) { return }
 
     if ($Title) {
         Write-UiSubheading -Title $Title
@@ -321,6 +345,8 @@ function Write-UiCallout {
         [string]$Tone = 'Info'
     )
 
+    if ($Script:Config.Unattended) { return }
+
     Write-Host ''
     Write-Host ("  [{0}] {1}" -f $Tone.ToUpper(), $Title) -ForegroundColor (Get-UiColor $Tone)
     foreach ($line in $Lines) {
@@ -333,6 +359,10 @@ function Read-Confirmation {
         [string]$Prompt,
         [switch]$DefaultYes
     )
+
+    if ($Script:Config.Unattended) {
+        return [bool]$DefaultYes
+    }
 
     $suffix = if ($DefaultYes) { '[Y/n]' } else { '[y/N]' }
 
@@ -419,6 +449,16 @@ function Write-Log {
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $logMessage = "[$timestamp] [$Level] $Message"
 
+    if ($Script:CurrentPhaseTelemetry) {
+        if ($Level -eq 'WARNING') {
+            $Script:CurrentPhaseTelemetry.Warnings++
+        }
+        elseif ($Level -eq 'ERROR') {
+            $Script:CurrentPhaseTelemetry.Errors++
+        }
+    }
+
+    if (-not $Script:Config.Unattended) {
     switch ($Level) {
         'SECTION' {
             Write-UiHeader -Title $Message -Tone 'Section'
@@ -442,10 +482,14 @@ function Write-Log {
         }
     }
 
+    }
+
     Add-Content -Path $Script:Config.LogPath -Value $logMessage -ErrorAction SilentlyContinue
 }
 
 function Show-Banner {
+    if ($Script:Config.Unattended) { return }
+
     Clear-Host
     Write-Host ''
     Write-UiRule -Tone 'Emphasis' -Character '═'
@@ -1820,8 +1864,13 @@ function Repair-ServiceDependencies {
                 }
 
                 if ($dep.Status -ne 'Running') {
-                    Start-Service -Name $depName -ErrorAction SilentlyContinue
-                    Start-Sleep -Milliseconds 500
+                    $startResult = Invoke-WUServiceControl -ServiceName $depName -Action start -DesiredState Running -TimeoutSeconds 20
+                    if ($startResult.StateReached) {
+                        Write-Log "$depName dependency running" -Level SUCCESS
+                    }
+                    else {
+                        Write-Log "Could not confirm $depName dependency running: $($startResult.Output)" -Level WARNING
+                    }
                 }
             }
         }
@@ -2110,23 +2159,12 @@ function Stop-WUServices {
         if ($svc) {
             if ($svc.Status -eq 'Running') {
                 Write-Log "Stopping $($svc.DisplayName)..."
-                try {
-                    Stop-Service -Name $svcName -Force -ErrorAction Stop
-                    $timeout = 30
-                    $timer = [Diagnostics.Stopwatch]::StartNew()
-                    while ((Get-Service -Name $svcName).Status -ne 'Stopped' -and $timer.Elapsed.TotalSeconds -lt $timeout) {
-                        Start-Sleep -Milliseconds 500
-                    }
-
-                    if ((Get-Service -Name $svcName).Status -eq 'Stopped') {
-                        Write-Log "$($svc.DisplayName) stopped" -Level SUCCESS
-                    }
-                    else {
-                        Write-Log "$($svc.DisplayName) did not stop within timeout" -Level WARNING
-                    }
+                $stopResult = Invoke-WUServiceControl -ServiceName $svcName -Action stop -DesiredState Stopped -TimeoutSeconds 30
+                if ($stopResult.StateReached) {
+                    Write-Log "$($svc.DisplayName) stopped" -Level SUCCESS
                 }
-                catch {
-                    Write-Log "Failed to stop $($svc.DisplayName): $($_.Exception.Message)" -Level WARNING
+                else {
+                    Write-Log "$($svc.DisplayName) did not stop within timeout: $($stopResult.Output)" -Level WARNING
                 }
             }
             else {
@@ -2156,24 +2194,27 @@ function Start-WUServices {
 
             if ($svc.Status -ne 'Running') {
                 Write-Log "Starting $($svc.DisplayName)..."
-                try {
-                    Start-Service -Name $svcName -ErrorAction Stop
+                $startResult = Invoke-WUServiceControl -ServiceName $svcName -Action start -DesiredState Running -TimeoutSeconds 30
+                if ($startResult.StateReached) {
                     Write-Log "$($svc.DisplayName) started" -Level SUCCESS
                 }
-                catch {
-                    Write-Log "Failed to start $($svc.DisplayName): $($_.Exception.Message)" -Level WARNING
+                else {
+                    Write-Log "Failed to start $($svc.DisplayName): $($startResult.Output)" -Level WARNING
 
                     # If BITS fails, try repairing it
                     if ($svcName -eq 'bits') {
                         Write-Log "Attempting BITS repair..." -Level INFO
-                        try {
-                            # Re-register BITS
-                            $null = regsvr32 /s "$env:SystemRoot\System32\qmgr.dll" 2>&1
-                            $null = regsvr32 /s "$env:SystemRoot\System32\qmgrprxy.dll" 2>&1
-                            Start-Sleep -Seconds 2
-                            Start-Service -Name 'bits' -ErrorAction SilentlyContinue
+                        # Re-register BITS
+                        $null = regsvr32 /s "$env:SystemRoot\System32\qmgr.dll" 2>&1
+                        $null = regsvr32 /s "$env:SystemRoot\System32\qmgrprxy.dll" 2>&1
+                        Start-Sleep -Seconds 2
+                        $bitsRetry = Invoke-WUServiceControl -ServiceName 'bits' -Action start -DesiredState Running -TimeoutSeconds 30
+                        if ($bitsRetry.StateReached) {
+                            Write-Log "BITS started after repair" -Level SUCCESS
                         }
-                        catch { }
+                        else {
+                            Write-Log "BITS still did not start after repair: $($bitsRetry.Output)" -Level WARNING
+                        }
                     }
                 }
             }
@@ -2424,6 +2465,29 @@ function Wait-WUServiceState {
     }
 
     return $false
+}
+
+function Invoke-WUServiceControl {
+    param(
+        [string]$ServiceName,
+        [ValidateSet('start', 'stop')]
+        [string]$Action,
+        [string]$DesiredState,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $output = & sc.exe $Action $ServiceName 2>&1
+    $exitCode = $LASTEXITCODE
+    $stateReached = Wait-WUServiceState -ServiceName $ServiceName -DesiredState $DesiredState -TimeoutSeconds $TimeoutSeconds
+
+    return [PSCustomObject]@{
+        ServiceName  = $ServiceName
+        Action       = $Action
+        DesiredState = $DesiredState
+        ExitCode     = $exitCode
+        Output       = ($output -join ' ')
+        StateReached = $stateReached
+    }
 }
 
 function Repair-WaaSOrchestrator {
@@ -3482,7 +3546,9 @@ function Write-JsonRepairReport {
         [hashtable]$PostReport,
         [bool]$PostConnectivity,
         [array]$PhaseResults,
-        [hashtable]$Options
+        [hashtable]$Options,
+        [string]$OverallStatus,
+        [int]$ExitCode
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -3505,6 +3571,8 @@ function Write-JsonRepairReport {
             DurationSeconds        = [math]::Round($Duration.TotalSeconds, 2)
             Mode                   = $ModeLabel
             SelectiveMode          = $SelectiveMode
+            OverallStatus          = $OverallStatus
+            ExitCode               = $ExitCode
             Options                = $Options
             LogPath                = $Script:Config.LogPath
             PostRepairConnectivity = if ($PostConnectivity) { 'AllEndpointsReachable' } else { 'SomeEndpointsUnreachable' }
@@ -3544,15 +3612,18 @@ function Start-WURepair {
         [switch]$RepairServicingStack,
         [switch]$StageSSU,
         [switch]$RepairAll,
-        [string]$JsonReport
+        [string]$JsonReport,
+        [switch]$Unattended
     )
 
+    $Script:Config.Unattended = [bool]$Unattended
     Show-Banner
 
     if (-not (Test-AdminRights)) {
         Write-Log "This script requires Administrator privileges!" -Level ERROR
         Write-Log "Please right-click and 'Run as Administrator'"
-        return
+        $Script:LastRunExitCode = $Script:ExitCodes.NotAdministrator
+        return $Script:LastRunExitCode
     }
 
     # Initialize event log source
@@ -3682,9 +3753,10 @@ function Start-WURepair {
         'The tool does not remove user files, but it will stop services, rename update caches, and may request a restart.'
     )
 
-    if (-not (Read-Confirmation -Prompt 'Start repair now')) {
+    if (-not (Read-Confirmation -Prompt 'Start repair now' -DefaultYes:$Unattended)) {
         Write-Log "Operation cancelled by user" -Level WARNING
-        return
+        $Script:LastRunExitCode = $Script:ExitCodes.Cancelled
+        return $Script:LastRunExitCode
     }
 
     if (-not $selectiveMode) {
@@ -3760,23 +3832,52 @@ function Start-WURepair {
         $currentPhase++
         $pct = [int](($currentPhase / $totalPhases) * 100)
         $phaseStart = Get-Date
-        Write-Progress -Activity "WURepair v$($Script:Config.Version)" `
-            -Status "Phase $currentPhase of $totalPhases : $($phase.Name)" `
-            -PercentComplete $pct
+        if (-not $Script:Config.Unattended) {
+            Write-Progress -Activity "WURepair v$($Script:Config.Version)" `
+                -Status "Phase $currentPhase of $totalPhases : $($phase.Name)" `
+                -PercentComplete $pct
+        }
         Write-Log "--- Phase $currentPhase of $totalPhases : $($phase.Name) ---"
-        & $phase.Action
+        $Script:CurrentPhaseTelemetry = [PSCustomObject]@{
+            Warnings = 0
+            Errors   = 0
+        }
+        $phaseException = $null
+        try {
+            & $phase.Action
+        }
+        catch {
+            $phaseException = $_
+            Write-Log "Phase '$($phase.Name)' failed: $($_.Exception.Message)" -Level ERROR
+        }
         $phaseEnd = Get-Date
+        $phaseStatus = if ($Script:CurrentPhaseTelemetry.Errors -gt 0) {
+            'Errors'
+        }
+        elseif ($Script:CurrentPhaseTelemetry.Warnings -gt 0) {
+            'Warnings'
+        }
+        else {
+            'Success'
+        }
         $phaseResults += [PSCustomObject]@{
             Index           = $currentPhase
             Name            = $phase.Name
-            Status          = 'Completed'
+            Status          = $phaseStatus
+            Changed         = ($phaseStatus -ne 'Skipped')
+            Warnings        = $Script:CurrentPhaseTelemetry.Warnings
+            Errors          = $Script:CurrentPhaseTelemetry.Errors
+            Exception       = if ($phaseException) { [string]$phaseException.Exception.Message } else { $null }
             StartedAt       = $phaseStart.ToString('o')
             EndedAt         = $phaseEnd.ToString('o')
             DurationSeconds = [math]::Round(($phaseEnd - $phaseStart).TotalSeconds, 2)
         }
+        $Script:CurrentPhaseTelemetry = $null
     }
 
-    Write-Progress -Activity "WURepair v$($Script:Config.Version)" -Completed
+    if (-not $Script:Config.Unattended) {
+        Write-Progress -Activity "WURepair v$($Script:Config.Version)" -Completed
+    }
 
     # ── Post-repair connectivity test ──
     Write-Log "POST-REPAIR CONNECTIVITY TEST" -Level SECTION
@@ -3804,6 +3905,28 @@ function Start-WURepair {
     $summaryText = $summaryLines -join "`r`n"
     Write-RepairEventLog -Message $summaryText -EventId 1001
 
+    $phaseErrorCount = @($phaseResults | Where-Object { $_.Status -eq 'Errors' }).Count
+    $phaseWarningCount = @($phaseResults | Where-Object { $_.Status -eq 'Warnings' }).Count
+    $overallStatus = if ($phaseErrorCount -gt 0) {
+        'Errors'
+    }
+    elseif (-not $postConnectivity) {
+        'ConnectivityFailure'
+    }
+    elseif ($phaseWarningCount -gt 0) {
+        'Warnings'
+    }
+    else {
+        'Success'
+    }
+
+    $Script:LastRunExitCode = switch ($overallStatus) {
+        'Success' { $Script:ExitCodes.Success }
+        'Warnings' { $Script:ExitCodes.Warnings }
+        'ConnectivityFailure' { $Script:ExitCodes.ConnectivityFailure }
+        default { $Script:ExitCodes.PhaseErrors }
+    }
+
     $reportOptions = @{
         QuickMode             = [bool]$QuickMode
         SkipDISM              = [bool]$SkipDISM
@@ -3820,8 +3943,9 @@ function Start-WURepair {
         RepairServicingStack  = [bool]$RepairServicingStack
         StageSSU              = [bool]$StageSSU
         RepairAll             = [bool]$RepairAll
+        Unattended            = [bool]$Unattended
     }
-    Write-JsonRepairReport -Path $JsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions
+    Write-JsonRepairReport -Path $JsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
 
     # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
@@ -3855,13 +3979,15 @@ function Start-WURepair {
         )
     }
 
-    if (Read-Confirmation -Prompt 'Restart now') {
+    if (Read-Confirmation -Prompt 'Restart now' -DefaultYes:$false) {
         Write-Log "Initiating restart..."
         Restart-Computer -Force
     }
     else {
         Write-Log "Restart deferred by user" -Level WARNING
     }
+
+    return $Script:LastRunExitCode
 }
 
 function Show-Help {
@@ -3879,6 +4005,7 @@ function Show-Help {
         '-SkipBackup           Skip extra cache folder backups before reset.',
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
+        '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
         '-Help                 Show this help screen.'
     )
 
@@ -3902,6 +4029,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -SkipDISM'
     )
 
@@ -3954,6 +4082,7 @@ if ($args -contains '-RepairWaaS') { $params['RepairWaaS'] = $true }
 if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
 if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
+if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
@@ -3964,4 +4093,7 @@ if ($args -contains '-Help' -or $args -contains '-?') {
 }
 
 # Run the repair
-Start-WURepair @params
+$exitCode = Start-WURepair @params
+if ($Script:Config.Unattended) {
+    exit $exitCode
+}

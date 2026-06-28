@@ -9,7 +9,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 ### Repair Engines
 
 ### Reporting
-- `-Unattended` mode: no host UI, no `Write-Host`, exit codes mapped to phase outcomes so it composes cleanly in PDQ/Intune/Tanium.
 - Intune proactive remediation detection + remediation script pair generated from the existing phases.
 
 ### Packaging
@@ -63,27 +62,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 - Idempotency: each action checks current state before mutating, safe to re-run
 
 ## Research-Driven Additions
-
-- [ ] P0 - Replace blocking service cmdlets with timeout-safe service control
-  Why: Current `Start-Service` / `Stop-Service` calls can block or surface host UI in silent automation, undermining the existing unattended/RMM roadmap item.
-  Evidence: `WURepair.ps1:1848`, `WURepair.ps1:2139`, `WURepair.ps1:2185`, `WURepair.ps1:2199`; PowerShell stack convention; Intune remediations docs.
-  Touches: `WURepair.ps1` service helpers and any phase that starts/stops services.
-  Acceptance: No `Start-Service`, `Stop-Service`, `Restart-Service`, or `Set-Service -Status` calls remain; each service operation has a timeout, logs stdout/stderr, and reports success/failure to the phase result model.
-  Complexity: M
-
-- [ ] P0 - Return real phase statuses instead of unconditional completion
-  Why: JSON reports and event logs must not mark failed or partially failed repairs as completed.
-  Evidence: `WURepair.ps1:3788` phase loop; `WURepair.ps1:3849` JSON report; commercial patch/RMM tools treat exit/result fidelity as core value.
-  Touches: `Start-WURepair`, `Write-JsonRepairReport`, `Write-RepairEventLog`, each repair function return path.
-  Acceptance: Each phase returns `Success`, `Skipped`, `Changed`, `Warnings`, and `Errors`; JSON/event output reflects those fields; failed phases produce non-success automation exit codes once the existing unattended item lands.
-  Complexity: L
-
-- [ ] P0 - Add local Pester and PSScriptAnalyzer validation harness
-  Why: A privileged system-repair script needs automated parser, lint, and mocked behavior coverage before signed releases or PSGallery packaging.
-  Evidence: no tracked tests/manifests; Pester docs; PSScriptAnalyzer project; PSGallery publishing guidance.
-  Touches: `tests/`, `WURepair.ps1`, optional `Invoke-LocalChecks.ps1` helper.
-  Acceptance: A local command runs parser validation, PSScriptAnalyzer, and Pester tests with mocks for registry, service, filesystem, process, Catalog, DISM, and HRESULT parsing paths.
-  Complexity: L
 
 - [ ] P1 - Add a mutation journal and rollback helper for destructive repairs
   Why: Backups exist, but operators need a single machine-readable record of every hosts, registry, cache, and policy mutation and how to reverse it.

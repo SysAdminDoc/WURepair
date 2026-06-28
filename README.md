@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.11.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.12.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -65,6 +65,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
 - **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
+- **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
 - **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
 - **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`, `-RepairWaaS`, `-RepairDelivery`
@@ -79,7 +80,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.11.0
+    Windows Update Repair Tool v2.12.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -142,6 +143,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipBackup` | Skip backup of Windows Update folders |
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
+| `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
 | `-Help` | Display help information |
 
 ### Selective Repair Switches
@@ -162,6 +164,17 @@ Run individual repair phases instead of the full pipeline:
 | `-RepairAll` | Run all phases (default when no switch given) |
 
 Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
+
+### Unattended Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `10` | Completed with warnings |
+| `20` | One or more repair phases reported errors |
+| `30` | Repair ran, but post-repair connectivity still failed |
+| `40` | Administrator rights missing |
+| `50` | Run cancelled before repair |
 
 ### Examples
 
@@ -192,7 +205,18 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Full repair with RMM-readable JSON report
 .\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json
+
+# RMM-safe run with no host UI and stable exit code
+.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
 ```
+
+### Local Validation
+
+```powershell
+.\Invoke-LocalChecks.ps1
+```
+
+This runs PowerShell parser validation, PSScriptAnalyzer, and the Pester static-contract tests before release packaging.
 
 ## What Gets Fixed
 
@@ -281,7 +305,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.11.0 Flow                      │
+│                      WURepair v2.12.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -305,7 +329,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 │ 20. Post-Repair Connectivity Test                               │
 │ 21. Post-Repair Verification (before/after comparison)          │
 │ 22. Trigger Update Scan                                         │
-│ 23. Write Event Log Summary / optional JSON report              │
+│ 23. Write Event Log Summary / optional JSON report / exit code  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -327,6 +351,12 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.12.0
+- Added `-Unattended` mode for RMM/Intune/PDQ/Tanium runs
+- Replaced blocking service cmdlets with timeout-safe `sc.exe` service control
+- Phase results now report `Success`, `Warnings`, or `Errors` with warning/error counts, overall status, and automation exit code
+- Added `Invoke-LocalChecks.ps1` with parser, PSScriptAnalyzer, and Pester validation
 
 ### v2.11.0
 - Added optional `-JsonReport <path>` output for RMM ingestion
