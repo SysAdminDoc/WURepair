@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.12.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.13.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -66,6 +66,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
 - **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
 - **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
+- **Mutation Journal & Rollback**: Writes a per-run JSON journal of hosts, registry, policy, and cache mutations; `-RollbackJournal` previews/apply reversible changes
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
 - **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
 - **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`, `-RepairWaaS`, `-RepairDelivery`
@@ -80,7 +81,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.12.0
+    Windows Update Repair Tool v2.13.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -143,6 +144,9 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipBackup` | Skip backup of Windows Update folders |
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
+| `-JournalPath <path>` | Override the mutation journal JSON path |
+| `-RollbackJournal <path>` | Preview reversible changes from a mutation journal |
+| `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
 | `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
 | `-Help` | Display help information |
 
@@ -208,6 +212,12 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # RMM-safe run with no host UI and stable exit code
 .\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
+
+# Preview reversible changes from a previous run
+.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json
+
+# Apply reversible changes from a previous run
+.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json -ApplyRollback
 ```
 
 ### Local Validation
@@ -283,6 +293,7 @@ Windows 10/11 LTSC and IoT editions only receive security updates. Feature updat
 | File | Location | Purpose |
 |------|----------|---------|
 | `WURepair_[timestamp].log` | Desktop | Detailed operation log |
+| `WURepair_Journal_[timestamp].json` | Desktop | Machine-readable mutation journal and rollback data |
 | `SoftwareDistribution.bak.[timestamp]` | C:\Windows | Backup of update cache |
 | `catroot2.bak.[timestamp]` | C:\Windows\System32 | Backup of crypto cache |
 | `hosts.backup.[timestamp]` | C:\Windows\System32\drivers\etc | Backup of hosts file |
@@ -292,7 +303,7 @@ Windows 10/11 LTSC and IoT editions only receive security updates. Feature updat
 If something goes wrong:
 
 1. **System Restore**: The script creates a restore point before making changes
-2. **Registry Backups**: Original registry values are logged
+2. **Mutation Journal**: Reversible hosts, registry, policy, and cache-folder mutations are written to `WURepair_Journal_[timestamp].json`
 3. **Folder Backups**: SoftwareDistribution and catroot2 are renamed, not deleted
 4. **Hosts Backup**: Original hosts file is preserved with timestamp
 
@@ -301,11 +312,17 @@ To restore the hosts file manually:
 Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows\System32\drivers\etc\hosts" -Force
 ```
 
+To preview or apply journal rollback:
+```powershell
+.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json
+.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json -ApplyRollback
+```
+
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.12.0 Flow                      │
+│                      WURepair v2.13.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -329,7 +346,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 │ 20. Post-Repair Connectivity Test                               │
 │ 21. Post-Repair Verification (before/after comparison)          │
 │ 22. Trigger Update Scan                                         │
-│ 23. Write Event Log Summary / optional JSON report / exit code  │
+│ 23. Write Event Log Summary / JSON report / journal / exit code │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -351,6 +368,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.13.0
+- Added per-run mutation journal JSON for hosts, registry, policy, and cache changes
+- Added `-RollbackJournal <path>` preview and `-ApplyRollback` restore mode for reversible journal entries
+- JSON reports now include mutation journal path and entry counts
 
 ### v2.12.0
 - Added `-Unattended` mode for RMM/Intune/PDQ/Tanium runs

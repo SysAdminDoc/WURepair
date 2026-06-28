@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.13.0 adds mutation journaling and rollback support.
     v2.12.0 adds unattended mode with automation exit codes.
     v2.11.0 adds optional JSON repair reports for RMM ingestion.
     v2.10.0 adds Microsoft Update Catalog SSU repair fallback.
@@ -25,7 +26,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.12.0
+    Version: 2.13.0
 #>
 
 #Requires -RunAsAdministrator
@@ -41,11 +42,12 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.12.0'
+    Version                            = '2.13.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
     Unattended                         = $false
+    JournalPath                        = "$env:USERPROFILE\Desktop\WURepair_Journal_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     Ui                                 = @{
         AccentColor   = 'Cyan'
         TitleColor    = 'White'
@@ -148,6 +150,7 @@ $Script:WUTraceLogAttempted = $false
 $Script:WUTraceLogPath = $null
 $Script:CurrentPhaseTelemetry = $null
 $Script:LastRunExitCode = 0
+$Script:MutationJournal = $null
 $Script:ExitCodes = @{
     Success             = 0
     Warnings            = 10
@@ -485,6 +488,408 @@ function Write-Log {
     }
 
     Add-Content -Path $Script:Config.LogPath -Value $logMessage -ErrorAction SilentlyContinue
+}
+
+function Initialize-WUMutationJournal {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        $Path = $Script:Config.JournalPath
+    }
+
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -Path $parent -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    $Script:Config.JournalPath = $Path
+    $Script:MutationJournal = [ordered]@{
+        SchemaVersion = 1
+        Tool          = 'WURepair'
+        Version       = $Script:Config.Version
+        ComputerName  = $env:COMPUTERNAME
+        CreatedAt     = (Get-Date).ToString('o')
+        JournalPath   = $Path
+        Entries       = @()
+    }
+
+    Save-WUMutationJournal
+}
+
+function Save-WUMutationJournal {
+    if (-not $Script:MutationJournal) { return }
+
+    try {
+        $json = $Script:MutationJournal | ConvertTo-Json -Depth 16
+        Set-Content -LiteralPath $Script:Config.JournalPath -Value $json -Encoding UTF8 -Force
+    }
+    catch {
+        Write-Log "Could not write mutation journal: $($_.Exception.Message)" -Level WARNING
+    }
+}
+
+function Get-WUMutationJournalSummary {
+    $rawEntries = if ($Script:MutationJournal) { $Script:MutationJournal['Entries'] } else { $null }
+    $entries = New-Object System.Collections.Generic.List[object]
+    if ($null -ne $rawEntries) {
+        if ($rawEntries -is [array]) {
+            foreach ($rawEntry in $rawEntries) {
+                [void]$entries.Add($rawEntry)
+            }
+        }
+        else {
+            [void]$entries.Add($rawEntries)
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path            = $Script:Config.JournalPath
+        EntryCount      = $entries.Count
+        ReversibleCount = @($entries | Where-Object { $_.Reversible }).Count
+    }
+}
+
+function Add-WUMutationJournalEntry {
+    param(
+        [string]$Category,
+        [string]$Action,
+        [string]$Target,
+        [AllowNull()][object]$Before,
+        [AllowNull()][object]$After,
+        [string]$RollbackType = 'None',
+        [AllowNull()][object]$RollbackData,
+        [bool]$Succeeded = $true,
+        [string]$Notes = ''
+    )
+
+    if (-not $Script:MutationJournal) { return }
+
+    $entry = [ordered]@{
+        Id         = ([guid]::NewGuid()).ToString()
+        Timestamp  = (Get-Date).ToString('o')
+        Category   = $Category
+        Action     = $Action
+        Target     = $Target
+        Before     = $Before
+        After      = $After
+        Succeeded  = $Succeeded
+        Reversible = (-not [string]::IsNullOrWhiteSpace($RollbackType) -and $RollbackType -ne 'None')
+        Rollback   = [ordered]@{
+            Type = $RollbackType
+            Data = $RollbackData
+        }
+        Notes      = $Notes
+    }
+
+    $existingEntries = $Script:MutationJournal['Entries']
+    if ($null -eq $existingEntries) {
+        $Script:MutationJournal['Entries'] = ,$entry
+    }
+    elseif ($existingEntries -is [array]) {
+        $Script:MutationJournal['Entries'] = $existingEntries + ,$entry
+    }
+    else {
+        $Script:MutationJournal['Entries'] = @($existingEntries) + ,$entry
+    }
+    Save-WUMutationJournal
+}
+
+function Get-WUPathSnapshot {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [PSCustomObject]@{
+            Exists = $false
+            Path   = $Path
+        }
+    }
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) {
+        return [PSCustomObject]@{
+            Exists = $false
+            Path   = $Path
+        }
+    }
+
+    $childCount = $null
+    if ($item.PSIsContainer) {
+        $childCount = @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction SilentlyContinue).Count
+    }
+
+    return [PSCustomObject]@{
+        Exists        = $true
+        Path          = $Path
+        ItemType      = if ($item.PSIsContainer) { 'Directory' } else { 'File' }
+        Length        = if ($item.PSIsContainer) { $null } else { $item.Length }
+        LastWriteTime = $item.LastWriteTime.ToString('o')
+        ChildCount    = $childCount
+    }
+}
+
+function Get-WURegistryValueSnapshot {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    $snapshot = [ordered]@{
+        Exists    = $false
+        Path      = $Path
+        Name      = $Name
+        Value     = $null
+        ValueKind = $null
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [PSCustomObject]$snapshot
+    }
+
+    try {
+        $property = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
+        $snapshot.Exists = $true
+        $snapshot.Value = $property.$Name
+        try {
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            $snapshot.ValueKind = [string]$key.GetValueKind($Name)
+        }
+        catch {
+            $snapshot.ValueKind = 'String'
+        }
+    }
+    catch { }
+
+    return [PSCustomObject]$snapshot
+}
+
+function Restore-WURegistryValueSnapshot {
+    param([object]$Snapshot)
+
+    if (-not $Snapshot -or [string]::IsNullOrWhiteSpace([string]$Snapshot.Path) -or [string]::IsNullOrWhiteSpace([string]$Snapshot.Name)) {
+        return $false
+    }
+
+    if (-not $Snapshot.Exists) {
+        if (Test-Path -LiteralPath $Snapshot.Path) {
+            Remove-ItemProperty -LiteralPath $Snapshot.Path -Name $Snapshot.Name -Force -ErrorAction SilentlyContinue
+        }
+        return $true
+    }
+
+    if (-not (Test-Path -LiteralPath $Snapshot.Path)) {
+        New-Item -Path $Snapshot.Path -Force -ErrorAction Stop | Out-Null
+    }
+
+    $valueKind = if ($Snapshot.ValueKind) { [string]$Snapshot.ValueKind } else { 'String' }
+    $allowedKinds = @('String', 'ExpandString', 'Binary', 'DWord', 'MultiString', 'QWord')
+    if ($allowedKinds -notcontains $valueKind) {
+        $valueKind = 'String'
+    }
+
+    New-ItemProperty -LiteralPath $Snapshot.Path -Name $Snapshot.Name -Value $Snapshot.Value -PropertyType $valueKind -Force -ErrorAction Stop | Out-Null
+    return $true
+}
+
+function Set-WURegistryValueWithJournal {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [AllowNull()][object]$Value,
+        [string]$Type = 'String',
+        [string]$Category = 'Registry',
+        [string]$Action = 'SetRegistryValue'
+    )
+
+    $before = Get-WURegistryValueSnapshot -Path $Path -Name $Name
+    $createdPath = $false
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        $createdPath = $true
+    }
+
+    if ($before.Exists) {
+        Set-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -Force -ErrorAction Stop
+    }
+    else {
+        New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+    }
+
+    $after = Get-WURegistryValueSnapshot -Path $Path -Name $Name
+    Add-WUMutationJournalEntry -Category $Category -Action $Action -Target "$Path::$Name" -Before $before -After $after -RollbackType 'RestoreRegistryValue' -RollbackData $before -Succeeded $true -Notes $(if ($createdPath) { 'Created missing registry path before setting value.' } else { '' })
+}
+
+function Remove-WURegistryValueWithJournal {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Category = 'Registry',
+        [string]$Action = 'RemoveRegistryValue'
+    )
+
+    $before = Get-WURegistryValueSnapshot -Path $Path -Name $Name
+    if (-not $before.Exists) {
+        return $false
+    }
+
+    Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop
+    $after = Get-WURegistryValueSnapshot -Path $Path -Name $Name
+    Add-WUMutationJournalEntry -Category $Category -Action $Action -Target "$Path::$Name" -Before $before -After $after -RollbackType 'RestoreRegistryValue' -RollbackData $before -Succeeded $true
+    return $true
+}
+
+function ConvertTo-WURegExePath {
+    param([string]$Path)
+
+    $converted = $Path -replace '^HKLM:', 'HKEY_LOCAL_MACHINE'
+    $converted = $converted -replace '^HKCU:', 'HKEY_CURRENT_USER'
+    $converted = $converted -replace '^HKCR:', 'HKEY_CLASSES_ROOT'
+    $converted = $converted -replace '^HKU:', 'HKEY_USERS'
+    $converted = $converted -replace '^HKCC:', 'HKEY_CURRENT_CONFIG'
+    return ($converted -replace '/', '\')
+}
+
+function Export-WURegistryKeyForRollback {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $Script:Config.BackupPath)) {
+            New-Item -Path $Script:Config.BackupPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $safeName = ($Name -replace '[^A-Za-z0-9._-]', '_')
+        $exportPath = Join-Path $Script:Config.BackupPath "$safeName.reg"
+        $regPath = ConvertTo-WURegExePath -Path $Path
+        $null = reg.exe export $regPath $exportPath /y 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $exportPath)) {
+            return $exportPath
+        }
+    }
+    catch { }
+
+    return $null
+}
+
+function Remove-WURegistryKeyWithJournal {
+    param(
+        [string]$Path,
+        [string]$Category = 'Registry',
+        [string]$Action = 'RemoveRegistryKey'
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+
+    $exportPath = Export-WURegistryKeyForRollback -Path $Path -Name $Path
+    $before = [PSCustomObject]@{
+        Exists        = $true
+        Path          = $Path
+        RollbackReg   = $exportPath
+        Exported      = -not [string]::IsNullOrWhiteSpace($exportPath)
+    }
+
+    Remove-Item -LiteralPath $Path -Force -Recurse -ErrorAction Stop
+    $after = [PSCustomObject]@{
+        Exists = (Test-Path -LiteralPath $Path)
+        Path   = $Path
+    }
+
+    Add-WUMutationJournalEntry -Category $Category -Action $Action -Target $Path -Before $before -After $after -RollbackType $(if ($exportPath) { 'ImportRegistryFile' } else { 'None' }) -RollbackData @{ RegFile = $exportPath; Path = $Path } -Succeeded $true
+    return $true
+}
+
+function Invoke-WUMutationRollback {
+    param(
+        [string]$Path,
+        [switch]$Apply
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Log "Rollback journal not found: $Path" -Level ERROR
+        return $false
+    }
+
+    try {
+        $journal = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-Log "Could not parse rollback journal: $($_.Exception.Message)" -Level ERROR
+        return $false
+    }
+
+    $entries = @($journal.Entries)
+    $reversible = @($entries | Where-Object { $_.Reversible })
+    Write-Log "Rollback journal loaded: $Path"
+    Write-Log "Reversible entries: $($reversible.Count) of $($entries.Count)"
+
+    foreach ($entry in $reversible) {
+        Write-Log "Rollback preview: [$($entry.Category)] $($entry.Action) -> $($entry.Target)"
+    }
+
+    if (-not $Apply) {
+        Write-Log "Rollback preview only. Re-run with -ApplyRollback to restore reversible changes." -Level WARNING
+        return $true
+    }
+
+    $success = $true
+    foreach ($entry in @($reversible | Sort-Object Timestamp -Descending)) {
+        try {
+            $rollbackType = [string]$entry.Rollback.Type
+            $data = $entry.Rollback.Data
+            switch ($rollbackType) {
+                'RestoreFileContent' {
+                    $target = [string]$data.Path
+                    $parent = Split-Path -Parent $target
+                    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+                        New-Item -Path $parent -ItemType Directory -Force | Out-Null
+                    }
+                    Set-Content -LiteralPath $target -Value @($data.Content) -Force
+                }
+                'RestoreFileFromBackup' {
+                    Copy-Item -LiteralPath ([string]$data.BackupPath) -Destination ([string]$data.OriginalPath) -Force -ErrorAction Stop
+                }
+                'RestorePathFromBackup' {
+                    $originalPath = [string]$data.OriginalPath
+                    $backupPath = [string]$data.BackupPath
+                    if (-not (Test-Path -LiteralPath $backupPath)) { throw "Backup path missing: $backupPath" }
+                    if (Test-Path -LiteralPath $originalPath) {
+                        $conflictPath = "$originalPath.rollback-conflict.$(Get-Date -Format 'yyyyMMddHHmmss')"
+                        Move-Item -LiteralPath $originalPath -Destination $conflictPath -Force -ErrorAction Stop
+                    }
+                    Move-Item -LiteralPath $backupPath -Destination $originalPath -Force -ErrorAction Stop
+                }
+                'RemoveCreatedPath' {
+                    $target = [string]$data.Path
+                    if (Test-Path -LiteralPath $target) {
+                        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+                    }
+                }
+                'RestoreRegistryValue' {
+                    [void](Restore-WURegistryValueSnapshot -Snapshot $data)
+                }
+                'ImportRegistryFile' {
+                    $regFile = [string]$data.RegFile
+                    if (-not (Test-Path -LiteralPath $regFile)) { throw "Registry export missing: $regFile" }
+                    $null = reg.exe import $regFile 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "reg.exe import failed with exit code $LASTEXITCODE" }
+                }
+                default {
+                    throw "Unsupported rollback type: $rollbackType"
+                }
+            }
+
+            Write-Log "Rollback applied: $($entry.Target)" -Level SUCCESS
+        }
+        catch {
+            $success = $false
+            Write-Log "Rollback failed for $($entry.Target): $($_.Exception.Message)" -Level ERROR
+        }
+    }
+
+    return $success
 }
 
 function Show-Banner {
@@ -1686,6 +2091,7 @@ function Repair-HostsFile {
 
     $removedCount = 0
     $newContent = @()
+    $removedLines = @()
 
     foreach ($line in $hostsContent) {
         $shouldRemove = $false
@@ -1697,6 +2103,7 @@ function Repair-HostsFile {
                 if ($line -match '^\s*(0\.0\.0\.0|127\.0\.0\.1)\s+') {
                     $shouldRemove = $true
                     $removedCount++
+                    $removedLines += $line
                     Write-Log "Removing block: $line" -Level INFO
                     break
                 }
@@ -1717,6 +2124,7 @@ function Repair-HostsFile {
             }
 
             Set-Content -Path $hostsPath -Value $newContent -Force -ErrorAction Stop
+            Add-WUMutationJournalEntry -Category 'Hosts' -Action 'RemoveMicrosoftBlocks' -Target $hostsPath -Before @{ Content = @($hostsContent); BackupPath = $backupPath } -After @{ Content = @($newContent); RemovedCount = $removedCount; RemovedLines = @($removedLines) } -RollbackType 'RestoreFileContent' -RollbackData @{ Path = $hostsPath; Content = @($hostsContent) } -Succeeded $true
             Write-Log "Removed $removedCount Microsoft domain blocks from hosts file" -Level SUCCESS
         }
         catch {
@@ -1746,10 +2154,7 @@ function Repair-TLSConfiguration {
 
     foreach ($setting in $protocols) {
         try {
-            if (-not (Test-Path $setting.Path)) {
-                New-Item -Path $setting.Path -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-            Set-ItemProperty -Path $setting.Path -Name $setting.Name -Value $setting.Value -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-WURegistryValueWithJournal -Path $setting.Path -Name $setting.Name -Value $setting.Value -Type DWord -Category 'TLS' -Action 'SetTlsRegistryValue'
         }
         catch { }
     }
@@ -1764,8 +2169,8 @@ function Repair-TLSConfiguration {
     foreach ($path in $netPaths) {
         try {
             if (Test-Path $path) {
-                Set-ItemProperty -Path $path -Name 'SystemDefaultTlsVersions' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $path -Name 'SchUseStrongCrypto' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-WURegistryValueWithJournal -Path $path -Name 'SystemDefaultTlsVersions' -Value 1 -Type DWord -Category 'TLS' -Action 'SetDotNetTlsRegistryValue'
+                Set-WURegistryValueWithJournal -Path $path -Name 'SchUseStrongCrypto' -Value 1 -Type DWord -Category 'TLS' -Action 'SetDotNetTlsRegistryValue'
             }
         }
         catch { }
@@ -1775,9 +2180,9 @@ function Repair-TLSConfiguration {
     # Reset Internet Settings
     try {
         $inetPath = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
-        Remove-ItemProperty -Path $inetPath -Name 'ProxyEnable' -Force -ErrorAction SilentlyContinue
-        Remove-ItemProperty -Path $inetPath -Name 'ProxyServer' -Force -ErrorAction SilentlyContinue
-        Remove-ItemProperty -Path $inetPath -Name 'ProxyOverride' -Force -ErrorAction SilentlyContinue
+        [void](Remove-WURegistryValueWithJournal -Path $inetPath -Name 'ProxyEnable' -Category 'Proxy' -Action 'RemoveProxyRegistryValue')
+        [void](Remove-WURegistryValueWithJournal -Path $inetPath -Name 'ProxyServer' -Category 'Proxy' -Action 'RemoveProxyRegistryValue')
+        [void](Remove-WURegistryValueWithJournal -Path $inetPath -Name 'ProxyOverride' -Category 'Proxy' -Action 'RemoveProxyRegistryValue')
         Write-Log "Proxy settings cleared" -Level SUCCESS
     }
     catch { }
@@ -1859,7 +2264,7 @@ function Repair-ServiceDependencies {
                 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$depName"
                 $startType = (Get-ItemProperty -Path $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
                 if ($startType -eq 4) {
-                    Set-ItemProperty -Path $regPath -Name 'Start' -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-WURegistryValueWithJournal -Path $regPath -Name 'Start' -Value 2 -Type DWord -Category 'Services' -Action 'SetDependencyStartType'
                     Write-Log "$depName was disabled, set to Automatic" -Level SUCCESS
                 }
 
@@ -1882,12 +2287,12 @@ function Repair-ServiceDependencies {
     if (Test-Path $bitsRegPath) {
         try {
             # Reset BITS to default configuration
-            Set-ItemProperty -Path $bitsRegPath -Name 'Start' -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $bitsRegPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-WURegistryValueWithJournal -Path $bitsRegPath -Name 'Start' -Value 3 -Type DWord -Category 'Services' -Action 'SetBitsRegistryValue'
+            Set-WURegistryValueWithJournal -Path $bitsRegPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Category 'Services' -Action 'SetBitsRegistryValue'
 
             # Reset ImagePath if corrupted
             $defaultImagePath = '%SystemRoot%\System32\svchost.exe -k netsvcs -p'
-            Set-ItemProperty -Path $bitsRegPath -Name 'ImagePath' -Value $defaultImagePath -Type ExpandString -Force -ErrorAction SilentlyContinue
+            Set-WURegistryValueWithJournal -Path $bitsRegPath -Name 'ImagePath' -Value $defaultImagePath -Type ExpandString -Category 'Services' -Action 'SetBitsRegistryValue'
 
             Write-Log "BITS service configuration repaired" -Level SUCCESS
         }
@@ -1902,8 +2307,8 @@ function Repair-ServiceDependencies {
         try {
             $currentStart = (Get-ItemProperty -Path $dosvcRegPath -Name 'Start' -ErrorAction SilentlyContinue).Start
             if ($currentStart -eq 4) {
-                Set-ItemProperty -Path $dosvcRegPath -Name 'Start' -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $dosvcRegPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-WURegistryValueWithJournal -Path $dosvcRegPath -Name 'Start' -Value 2 -Type DWord -Category 'Services' -Action 'SetDeliveryOptimizationStartType'
+                Set-WURegistryValueWithJournal -Path $dosvcRegPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Category 'Services' -Action 'SetDeliveryOptimizationStartType'
                 Write-Log "Delivery Optimization was DISABLED, now set to Automatic (Delayed)" -Level SUCCESS
             }
         }
@@ -1939,7 +2344,7 @@ function Repair-UpdatePolicies {
             if (Test-Path $policy.Path) {
                 $value = Get-ItemProperty -Path $policy.Path -Name $policy.Name -ErrorAction SilentlyContinue
                 if ($null -ne $value) {
-                    Remove-ItemProperty -Path $policy.Path -Name $policy.Name -Force -ErrorAction SilentlyContinue
+                    [void](Remove-WURegistryValueWithJournal -Path $policy.Path -Name $policy.Name -Category 'Policy' -Action 'RemoveBlockingPolicy')
                     Write-Log "Removed: $($policy.Name)" -Level SUCCESS
                     $removedCount++
                 }
@@ -2188,7 +2593,7 @@ function Start-WUServices {
 
             if ($startType -eq 4) {
                 # Service is disabled, enable it first
-                Set-ItemProperty -Path $regPath -Name 'Start' -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-WURegistryValueWithJournal -Path $regPath -Name 'Start' -Value 3 -Type DWord -Category 'Services' -Action 'EnableServiceBeforeStart'
                 Write-Log "$svcName was disabled, now enabled" -Level SUCCESS
             }
 
@@ -2240,11 +2645,11 @@ function Reset-WUServiceConfig {
                     default { 3 }
                 }
 
-                Set-ItemProperty -Path $regPath -Name 'Start' -Value $startValue -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-WURegistryValueWithJournal -Path $regPath -Name 'Start' -Value $startValue -Type DWord -Category 'Services' -Action 'SetServiceStartType'
 
                 # Set delayed start if needed
                 if ($svc.DelayedStart) {
-                    Set-ItemProperty -Path $regPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-WURegistryValueWithJournal -Path $regPath -Name 'DelayedAutoStart' -Value 1 -Type DWord -Category 'Services' -Action 'SetServiceDelayedStart'
                 }
 
                 Write-Log "$($svc.Name): StartType set to $($svc.StartType)" -Level SUCCESS
@@ -2258,7 +2663,19 @@ function Reset-WUServiceConfig {
     # Reset BITS jobs
     Write-Log "Clearing BITS transfer queue..."
     try {
-        Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue | Remove-BitsTransfer -ErrorAction SilentlyContinue
+        $bitsTransferCommand = Get-Command -Name Get-BitsTransfer -ErrorAction SilentlyContinue
+        $beforeBitsQueue = [PSCustomObject]@{
+            Available = [bool]$bitsTransferCommand
+            Count     = if ($bitsTransferCommand) { @(Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue).Count } else { 0 }
+        }
+        if ($bitsTransferCommand) {
+            Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue | Remove-BitsTransfer -ErrorAction SilentlyContinue
+        }
+        $afterBitsQueue = [PSCustomObject]@{
+            Available = $beforeBitsQueue.Available
+            Count     = if ($bitsTransferCommand) { @(Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue).Count } else { 0 }
+        }
+        Add-WUMutationJournalEntry -Category 'Cache' -Action 'ClearBitsTransferQueue' -Target 'BITS transfer queue' -Before $beforeBitsQueue -After $afterBitsQueue -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'BITS transfer jobs are not restored by rollback.'
         Write-Log "BITS queue cleared" -Level SUCCESS
     }
     catch {
@@ -2280,7 +2697,9 @@ function Backup-WUFolders {
             Write-Log "Backing up $folderName..."
             try {
                 $backupName = "$folder.bak.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+                $before = Get-WUPathSnapshot -Path $folder
                 Rename-Item -Path $folder -NewName $backupName -Force -ErrorAction Stop
+                Add-WUMutationJournalEntry -Category 'Cache' -Action 'RenameUpdateStore' -Target $folder -Before $before -After @{ OriginalExists = (Test-Path -LiteralPath $folder); BackupPath = $backupName; Backup = (Get-WUPathSnapshot -Path $backupName) } -RollbackType 'RestorePathFromBackup' -RollbackData @{ OriginalPath = $folder; BackupPath = $backupName } -Succeeded $true
                 Write-Log "$folderName backed up to $backupName" -Level SUCCESS
             }
             catch {
@@ -2296,8 +2715,10 @@ function Clear-WUCache {
     foreach ($folder in $Script:WUFolders) {
         if (Test-Path $folder) {
             Write-Log "Clearing $folder..."
+            $before = Get-WUPathSnapshot -Path $folder
             try {
                 Remove-Item -Path "$folder\*" -Recurse -Force -ErrorAction Stop
+                Add-WUMutationJournalEntry -Category 'Cache' -Action 'ClearUpdateStoreContents' -Target $folder -Before $before -After (Get-WUPathSnapshot -Path $folder) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Contents removed without a restorable folder backup in this step.'
                 Write-Log "$folder cleared" -Level SUCCESS
             }
             catch {
@@ -2306,10 +2727,12 @@ function Clear-WUCache {
                     ForEach-Object {
                         Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
                     }
+                Add-WUMutationJournalEntry -Category 'Cache' -Action 'BestEffortClearUpdateStoreContents' -Target $folder -Before $before -After (Get-WUPathSnapshot -Path $folder) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Fallback deletion attempted after initial cache clear failed.'
             }
         }
         else {
             New-Item -Path $folder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+            Add-WUMutationJournalEntry -Category 'Cache' -Action 'CreateUpdateStoreDirectory' -Target $folder -Before @{ Exists = $false; Path = $folder } -After (Get-WUPathSnapshot -Path $folder) -RollbackType 'RemoveCreatedPath' -RollbackData @{ Path = $folder } -Succeeded $true
             Write-Log "$folder recreated" -Level SUCCESS
         }
     }
@@ -2318,7 +2741,9 @@ function Clear-WUCache {
     $downloadCache = "$env:SystemRoot\SoftwareDistribution\Download"
     if (Test-Path $downloadCache) {
         Write-Log "Clearing download cache..."
+        $beforeDownloadCache = Get-WUPathSnapshot -Path $downloadCache
         Remove-Item -Path "$downloadCache\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Add-WUMutationJournalEntry -Category 'Cache' -Action 'ClearDownloadCacheContents' -Target $downloadCache -Before $beforeDownloadCache -After (Get-WUPathSnapshot -Path $downloadCache) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Download cache contents are not restored by rollback.'
     }
 
     # Clear pending.xml if exists
@@ -2326,9 +2751,16 @@ function Clear-WUCache {
     if (Test-Path $pendingXml) {
         Write-Log "Removing stuck pending.xml..."
         try {
+            if (-not (Test-Path -LiteralPath $Script:Config.BackupPath)) {
+                New-Item -Path $Script:Config.BackupPath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+            $pendingBackup = Join-Path $Script:Config.BackupPath "pending.xml.$(Get-Date -Format 'yyyyMMdd_HHmmss').bak"
+            Copy-Item -LiteralPath $pendingXml -Destination $pendingBackup -Force -ErrorAction SilentlyContinue
+            $beforePending = Get-WUPathSnapshot -Path $pendingXml
             takeown /f $pendingXml /a 2>&1 | Out-Null
             icacls $pendingXml /grant Administrators:F 2>&1 | Out-Null
             Remove-Item -Path $pendingXml -Force -ErrorAction Stop
+            Add-WUMutationJournalEntry -Category 'Cache' -Action 'RemovePendingXml' -Target $pendingXml -Before $beforePending -After (Get-WUPathSnapshot -Path $pendingXml) -RollbackType $(if (Test-Path -LiteralPath $pendingBackup) { 'RestoreFileFromBackup' } else { 'None' }) -RollbackData @{ OriginalPath = $pendingXml; BackupPath = $pendingBackup } -Succeeded $true
             Write-Log "pending.xml removed" -Level SUCCESS
         }
         catch {
@@ -2398,7 +2830,7 @@ function Reset-WURegistry {
     foreach ($key in $keysToRemove) {
         if (Test-Path $key) {
             try {
-                Remove-Item -Path $key -Force -Recurse -ErrorAction Stop
+                [void](Remove-WURegistryKeyWithJournal -Path $key -Category 'Registry' -Action 'RemovePendingUpdateKey')
                 Write-Log "Removed: $key" -Level SUCCESS
             }
             catch {
@@ -2411,11 +2843,13 @@ function Reset-WURegistry {
     $wuRegPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate'
     if (-not (Test-Path $wuRegPath)) {
         New-Item -Path $wuRegPath -Force -ErrorAction SilentlyContinue | Out-Null
+        Add-WUMutationJournalEntry -Category 'Registry' -Action 'CreateWindowsUpdateRegistryKey' -Target $wuRegPath -Before @{ Exists = $false; Path = $wuRegPath } -After @{ Exists = (Test-Path -LiteralPath $wuRegPath); Path = $wuRegPath } -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Created base Windows Update key; rollback leaves base key in place.'
     }
 
     $auPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update'
     if (-not (Test-Path $auPath)) {
         New-Item -Path $auPath -Force -ErrorAction SilentlyContinue | Out-Null
+        Add-WUMutationJournalEntry -Category 'Registry' -Action 'CreateWindowsUpdateAutoUpdateRegistryKey' -Target $auPath -Before @{ Exists = $false; Path = $auPath } -After @{ Exists = (Test-Path -LiteralPath $auPath); Path = $auPath } -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Created Auto Update key; rollback leaves base key in place.'
     }
 
     Write-Log "Registry cleanup complete" -Level SUCCESS
@@ -2434,7 +2868,11 @@ function Reset-WindowsUpdateAgent {
     foreach ($loc in $bitsLocations) {
         if (Test-Path $loc) {
             Get-ChildItem -Path $loc -Filter "qmgr*.dat" -ErrorAction SilentlyContinue |
-                ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
+                ForEach-Object {
+                    $beforeBitsFile = Get-WUPathSnapshot -Path $_.FullName
+                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                    Add-WUMutationJournalEntry -Category 'Cache' -Action 'RemoveBitsQueueFile' -Target $_.FullName -Before $beforeBitsFile -After (Get-WUPathSnapshot -Path $_.FullName) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'BITS queue files are not restored by rollback.'
+                }
         }
     }
     Write-Log "BITS data files removed" -Level SUCCESS
@@ -2442,8 +2880,8 @@ function Reset-WindowsUpdateAgent {
     Write-Log "Resetting Windows Update authorization..."
     $susClientId = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate'
     if (Test-Path $susClientId) {
-        Remove-ItemProperty -Path $susClientId -Name 'SusClientId' -ErrorAction SilentlyContinue
-        Remove-ItemProperty -Path $susClientId -Name 'SusClientIdValidation' -ErrorAction SilentlyContinue
+        [void](Remove-WURegistryValueWithJournal -Path $susClientId -Name 'SusClientId' -Category 'Registry' -Action 'RemoveWindowsUpdateAuthorizationId')
+        [void](Remove-WURegistryValueWithJournal -Path $susClientId -Name 'SusClientIdValidation' -Category 'Registry' -Action 'RemoveWindowsUpdateAuthorizationId')
     }
     Write-Log "Authorization reset complete" -Level SUCCESS
 }
@@ -2508,7 +2946,7 @@ function Repair-WaaSOrchestrator {
         try {
             $startValue = (Get-ItemProperty -LiteralPath $regPath -Name 'Start' -ErrorAction SilentlyContinue).Start
             if ($startValue -eq 4) {
-                Set-ItemProperty -LiteralPath $regPath -Name 'Start' -Value 3 -Type DWord -Force -ErrorAction Stop
+                Set-WURegistryValueWithJournal -Path $regPath -Name 'Start' -Value 3 -Type DWord -Category 'Services' -Action 'SetWaaSServiceStartType'
                 Write-Log "$serviceName was disabled, set to Manual" -Level SUCCESS
             }
         }
@@ -2608,9 +3046,12 @@ function Repair-DeliveryOptimization {
     }
 
     $cacheReset = $false
+    $cachePath = "$env:SystemRoot\SoftwareDistribution\DeliveryOptimization"
     if (Get-Command -Name Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue) {
         try {
+            $beforeDoCmdletCache = Get-WUPathSnapshot -Path $cachePath
             Delete-DeliveryOptimizationCache -Force -ErrorAction Stop -WarningAction SilentlyContinue
+            Add-WUMutationJournalEntry -Category 'Cache' -Action 'ClearDeliveryOptimizationCacheWithCmdlet' -Target $cachePath -Before $beforeDoCmdletCache -After (Get-WUPathSnapshot -Path $cachePath) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Delivery Optimization cache contents are not restored by rollback.'
             Write-Log "Delivery Optimization cache cleared with Delete-DeliveryOptimizationCache" -Level SUCCESS
             $cacheReset = $true
         }
@@ -2619,19 +3060,22 @@ function Repair-DeliveryOptimization {
         }
     }
 
-    $cachePath = "$env:SystemRoot\SoftwareDistribution\DeliveryOptimization"
     if (-not $cacheReset) {
         if (Test-Path -LiteralPath $cachePath) {
             $backupPath = "$cachePath.bak.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
             try {
+                $beforeDoCacheMove = Get-WUPathSnapshot -Path $cachePath
                 Move-Item -LiteralPath $cachePath -Destination $backupPath -Force -ErrorAction Stop
+                Add-WUMutationJournalEntry -Category 'Cache' -Action 'RenameDeliveryOptimizationCache' -Target $cachePath -Before $beforeDoCacheMove -After @{ OriginalExists = (Test-Path -LiteralPath $cachePath); BackupPath = $backupPath; Backup = (Get-WUPathSnapshot -Path $backupPath) } -RollbackType 'RestorePathFromBackup' -RollbackData @{ OriginalPath = $cachePath; BackupPath = $backupPath } -Succeeded $true
                 Write-Log "Delivery Optimization cache moved to: $backupPath" -Level SUCCESS
             }
             catch {
                 Write-Log "Could not move Delivery Optimization cache: $($_.Exception.Message)" -Level WARNING
                 try {
+                    $beforeDoCache = Get-WUPathSnapshot -Path $cachePath
                     Get-ChildItem -LiteralPath $cachePath -Force -ErrorAction Stop |
                         Remove-Item -Recurse -Force -ErrorAction Stop
+                    Add-WUMutationJournalEntry -Category 'Cache' -Action 'ClearDeliveryOptimizationCache' -Target $cachePath -Before $beforeDoCache -After (Get-WUPathSnapshot -Path $cachePath) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Delivery Optimization cache contents are not restored by rollback.'
                     Write-Log "Delivery Optimization cache contents removed" -Level SUCCESS
                 }
                 catch {
@@ -2644,7 +3088,11 @@ function Repair-DeliveryOptimization {
         }
 
         try {
+            $beforeCachePath = Get-WUPathSnapshot -Path $cachePath
             New-Item -Path $cachePath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            if (-not $beforeCachePath.Exists) {
+                Add-WUMutationJournalEntry -Category 'Cache' -Action 'CreateDeliveryOptimizationCacheDirectory' -Target $cachePath -Before $beforeCachePath -After (Get-WUPathSnapshot -Path $cachePath) -RollbackType 'RemoveCreatedPath' -RollbackData @{ Path = $cachePath } -Succeeded $true
+            }
             Write-Log "Delivery Optimization cache folder ready" -Level SUCCESS
         }
         catch {
@@ -2659,7 +3107,7 @@ function Repair-DeliveryOptimization {
             if (Test-Path -LiteralPath $policyPath) {
                 $currentValue = Get-WURegistryValue -Path $policyPath -Name $modeValue
                 if ($null -ne $currentValue) {
-                    Remove-ItemProperty -LiteralPath $policyPath -Name $modeValue -Force -ErrorAction Stop
+                    [void](Remove-WURegistryValueWithJournal -Path $policyPath -Name $modeValue -Category 'Policy' -Action 'RemoveDeliveryOptimizationPolicy')
                     Write-Log "Removed Delivery Optimization policy value: $modeValue" -Level SUCCESS
                 }
             }
@@ -3575,6 +4023,8 @@ function Write-JsonRepairReport {
             ExitCode               = $ExitCode
             Options                = $Options
             LogPath                = $Script:Config.LogPath
+            MutationJournalPath    = $Script:Config.JournalPath
+            MutationJournal        = Get-WUMutationJournalSummary
             PostRepairConnectivity = if ($PostConnectivity) { 'AllEndpointsReachable' } else { 'SomeEndpointsUnreachable' }
             PhaseResults           = $PhaseResults
             Delta                  = Get-DiagnosticReportDelta -Before $PreReport -After $PostReport
@@ -3613,6 +4063,9 @@ function Start-WURepair {
         [switch]$StageSSU,
         [switch]$RepairAll,
         [string]$JsonReport,
+        [string]$JournalPath,
+        [string]$RollbackJournal,
+        [switch]$ApplyRollback,
         [switch]$Unattended
     )
 
@@ -3628,6 +4081,14 @@ function Start-WURepair {
 
     # Initialize event log source
     Initialize-EventSource
+
+    if (-not [string]::IsNullOrWhiteSpace($RollbackJournal)) {
+        $rollbackSuccess = Invoke-WUMutationRollback -Path $RollbackJournal -Apply:$ApplyRollback
+        $Script:LastRunExitCode = if ($rollbackSuccess) { $Script:ExitCodes.Success } else { $Script:ExitCodes.PhaseErrors }
+        return $Script:LastRunExitCode
+    }
+
+    Initialize-WUMutationJournal -Path $JournalPath
 
     # Determine selective mode: if no specific -Repair* switch given, run all
     $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
@@ -3652,6 +4113,7 @@ function Start-WURepair {
     $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
     Write-Log "WURepair v$($Script:Config.Version) started at $startTime"
     Write-Log "Log file: $($Script:Config.LogPath)"
+    Write-Log "Mutation journal: $($Script:Config.JournalPath)"
 
     Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $modeLabel" -EventId 1000
 
@@ -3944,6 +4406,7 @@ function Start-WURepair {
         StageSSU              = [bool]$StageSSU
         RepairAll             = [bool]$RepairAll
         Unattended            = [bool]$Unattended
+        JournalPath           = $Script:Config.JournalPath
     }
     Write-JsonRepairReport -Path $JsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
 
@@ -4005,6 +4468,9 @@ function Show-Help {
         '-SkipBackup           Skip extra cache folder backups before reset.',
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
+        '-JournalPath <path>   Override the mutation journal JSON path.',
+        '-RollbackJournal <path>  Preview reversible changes from a mutation journal.',
+        '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
         '-Help                 Show this help screen.'
     )
@@ -4030,6 +4496,8 @@ function Show-Help {
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json',
+        '.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json -ApplyRollback',
         '.\WURepair.ps1 -SkipDISM'
     )
 
@@ -4083,9 +4551,16 @@ if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
 if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
+if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
+
+$journalPath = Get-CommandLineOptionValue -Arguments $args -Name '-JournalPath'
+if (-not [string]::IsNullOrWhiteSpace($journalPath)) { $params['JournalPath'] = $journalPath }
+
+$rollbackJournalPath = Get-CommandLineOptionValue -Arguments $args -Name '-RollbackJournal'
+if (-not [string]::IsNullOrWhiteSpace($rollbackJournalPath)) { $params['RollbackJournal'] = $rollbackJournalPath }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
     Show-Help
