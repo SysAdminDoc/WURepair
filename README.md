@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.2.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.3.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -53,6 +53,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 ### 📊 Diagnostics & Verification
 - **Diagnostic Pre-Check Report**: Formatted status table showing service states, folder sizes, DISM health, pending reboot status, last successful update date, and last 5 Windows Update errors from event log
 - **Ranked HRESULT Summary**: Parses `%WINDIR%\WindowsUpdate.log` and converted Windows Update ETW traces into the top 10 recurring error codes with Microsoft reference links
+- **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
@@ -70,7 +71,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.2.0
+    Windows Update Repair Tool v2.3.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -258,7 +259,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.2.0 Flow                       │
+│                      WURepair v2.3.0 Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -302,6 +303,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.3.0
+- Added WaaSMedic service/task/event diagnostics to the pre-check report
+- Added Delivery Optimization peer cache health, active job count, peer count, cache size, and transfer byte totals
 
 ### v2.2.0
 - Added ranked Windows Update HRESULT diagnostics from `%WINDIR%\WindowsUpdate.log` and converted ETW traces
