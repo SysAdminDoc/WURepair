@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.5.0 adds WSUS/SUP posture diagnostics.
     v2.4.0 adds Microsoft Update Health Tools and remediation detection.
     v2.3.0 adds WaaSMedic and Delivery Optimization health diagnostics.
     v2.2.0 adds ranked Windows Update HRESULT summaries from WindowsUpdate.log
@@ -17,7 +18,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.4.0
+    Version: 2.5.0
 #>
 
 #Requires -RunAsAdministrator
@@ -33,7 +34,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.4.0'
+    Version        = '2.5.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -713,6 +714,35 @@ function Get-WUServiceStateLabel {
     return "$($service.Status) ($startLabel)"
 }
 
+function Get-WURegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        $property = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
+        return $property.$Name
+    }
+    catch {
+        return $null
+    }
+}
+
+function Format-WUPolicyValue {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return 'Not configured'
+    }
+
+    return [string]$Value
+}
+
 function Get-WUNumericPropertyValue {
     param(
         [AllowNull()][object]$InputObject,
@@ -1082,6 +1112,123 @@ function Get-UpdateHealthToolDiagnostic {
     }
 }
 
+function Resolve-WUUrlDiagnostic {
+    param([AllowNull()][string]$Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return 'Not configured'
+    }
+
+    try {
+        $uri = [System.Uri]$Url
+        if (-not $uri.IsAbsoluteUri -or [string]::IsNullOrWhiteSpace($uri.Host)) {
+            return "Invalid URL: $Url"
+        }
+
+        $addresses = @([System.Net.Dns]::GetHostAddresses($uri.Host))
+        if ($addresses.Count -eq 0) {
+            return "$($uri.Host) -> no DNS records"
+        }
+
+        $addressText = ($addresses | Select-Object -First 3 | ForEach-Object { $_.IPAddressToString }) -join ', '
+        if ($addresses.Count -gt 3) {
+            $addressText = "$addressText, ..."
+        }
+        return "$($uri.Host) -> $addressText"
+    }
+    catch {
+        return "Unresolved: $Url ($($_.Exception.Message))"
+    }
+}
+
+function Get-WSUSPostureDiagnostic {
+    $wuPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $auPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+    $issues = New-Object 'System.Collections.Generic.List[string]'
+
+    $wuServer = Get-WURegistryValue -Path $wuPolicyPath -Name 'WUServer'
+    $wuStatusServer = Get-WURegistryValue -Path $wuPolicyPath -Name 'WUStatusServer'
+    $targetGroup = Get-WURegistryValue -Path $wuPolicyPath -Name 'TargetGroup'
+    $targetGroupEnabled = Get-WURegistryValue -Path $wuPolicyPath -Name 'TargetGroupEnabled'
+    $disableDualScan = Get-WURegistryValue -Path $wuPolicyPath -Name 'DisableDualScan'
+    $doNotConnect = Get-WURegistryValue -Path $wuPolicyPath -Name 'DoNotConnectToWindowsUpdateInternetLocations'
+    $useWUServer = Get-WURegistryValue -Path $auPolicyPath -Name 'UseWUServer'
+    $setQualitySource = Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates'
+    $setFeatureSource = Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates'
+    $setDriverSource = Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates'
+    $setOtherSource = Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates'
+
+    if ($useWUServer -eq 1 -and [string]::IsNullOrWhiteSpace([string]$wuServer)) {
+        [void]$issues.Add('UseWUServer is enabled but WUServer is empty')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$wuServer) -and -not [string]::IsNullOrWhiteSpace([string]$wuStatusServer)) {
+        try {
+            $serverUri = [System.Uri]$wuServer
+            $statusUri = [System.Uri]$wuStatusServer
+            if ($serverUri.Host -and $statusUri.Host -and $serverUri.Host -ne $statusUri.Host) {
+                [void]$issues.Add('WUServer and WUStatusServer point to different hosts')
+            }
+        }
+        catch {
+            [void]$issues.Add('WUServer or WUStatusServer is not a valid absolute URL')
+        }
+    }
+
+    if ($targetGroupEnabled -eq 1 -and [string]::IsNullOrWhiteSpace([string]$targetGroup)) {
+        [void]$issues.Add('TargetGroupEnabled is set but TargetGroup is empty')
+    }
+
+    if ($doNotConnect -eq 1 -and $useWUServer -ne 1) {
+        [void]$issues.Add('Online Windows Update access is disabled but WSUS is not enabled')
+    }
+
+    $sourcePolicyValues = @($setQualitySource, $setFeatureSource, $setDriverSource, $setOtherSource) | Where-Object { $null -ne $_ }
+    $sourcePolicySummary = if ($sourcePolicyValues.Count -gt 0) {
+        "Quality=$setQualitySource; Feature=$setFeatureSource; Driver=$setDriverSource; Other=$setOtherSource"
+    }
+    else {
+        'Not configured'
+    }
+
+    $dualScanText = switch ([string]$disableDualScan) {
+        '1' { 'Disabled by policy' }
+        '0' { 'Allowed' }
+        '' { 'Not configured' }
+        default {
+            if ($null -eq $disableDualScan) { 'Not configured' } else { "Value $disableDualScan" }
+        }
+    }
+
+    $posture = if ($issues.Count -gt 0) {
+        "$($issues.Count) issue(s) detected"
+    }
+    elseif ($useWUServer -eq 1) {
+        'WSUS/SUP configured'
+    }
+    elseif ($sourcePolicyValues.Count -gt 0) {
+        'WUfB source policy configured'
+    }
+    else {
+        'Direct Windows Update / default policy'
+    }
+
+    return [PSCustomObject]@{
+        PostureSummary       = $posture
+        Issues               = $issues.ToArray()
+        UseWUServer          = Format-WUPolicyValue -Value $useWUServer
+        WUServer             = Format-WUPolicyValue -Value $wuServer
+        WUStatusServer       = Format-WUPolicyValue -Value $wuStatusServer
+        WUServerResolution   = Resolve-WUUrlDiagnostic -Url $wuServer
+        StatusResolution     = Resolve-WUUrlDiagnostic -Url $wuStatusServer
+        TargetGroup          = Format-WUPolicyValue -Value $targetGroup
+        TargetGroupEnabled   = Format-WUPolicyValue -Value $targetGroupEnabled
+        DualScanPolicy       = $dualScanText
+        DoNotConnect         = Format-WUPolicyValue -Value $doNotConnect
+        SourcePolicy         = $sourcePolicySummary
+    }
+}
+
 # ============================================================================
 # DIAGNOSTIC PRE-CHECK REPORT
 # ============================================================================
@@ -1142,15 +1289,20 @@ function Get-DiagnosticReport {
     $waaSMedic = Get-WaaSMedicDiagnostic
     $deliveryOptimization = Get-DeliveryOptimizationDiagnostic
     $updateHealthTools = Get-UpdateHealthToolDiagnostic
+    $wsusPosture = Get-WSUSPostureDiagnostic
     $report['WaaSMedic'] = $waaSMedic
     $report['DeliveryOptimization'] = $deliveryOptimization
     $report['UpdateHealthTools'] = $updateHealthTools
+    $report['WSUSPosture'] = $wsusPosture
     $report['WaaSMedicStatus'] = $waaSMedic.ServiceStatus
     $report['DeliveryOptimizationPeerCache'] = $deliveryOptimization.PeerCacheHealth
     $report['DeliveryOptimizationMode'] = $deliveryOptimization.DownloadMode
     $report['UpdateHealthToolsStatus'] = $updateHealthTools.Presence
     $report['UpdateHealthServiceStatus'] = $updateHealthTools.UpdateHealthService
     $report['RemediationServiceStatus'] = $updateHealthTools.RemediationService
+    $report['WSUSPostureSummary'] = $wsusPosture.PostureSummary
+    $report['UseWUServer'] = $wsusPosture.UseWUServer
+    $report['DualScanPolicy'] = $wsusPosture.DualScanPolicy
 
     # -- SoftwareDistribution folder --
     $sdPath = "$env:SystemRoot\SoftwareDistribution"
@@ -1303,6 +1455,22 @@ function Get-DiagnosticReport {
     Write-UiMetric -Label 'DO bytes to peers' -Value $report['DeliveryOptimization'].BytesToPeers -Tone 'Info'
     Write-UiMetric -Label 'DO peer count' -Value $report['DeliveryOptimization'].PeerCount -Tone 'Info'
 
+    Write-UiSubheading -Title 'WSUS / SUP posture'
+    Write-UiMetric -Label 'Posture' -Value $report['WSUSPosture'].PostureSummary -Tone (Get-StatusTone $report['WSUSPosture'].PostureSummary)
+    Write-UiMetric -Label 'UseWUServer' -Value $report['WSUSPosture'].UseWUServer -Tone (Get-StatusTone $report['WSUSPosture'].UseWUServer)
+    Write-UiMetric -Label 'WUServer' -Value $report['WSUSPosture'].WUServer -Tone (Get-StatusTone $report['WSUSPosture'].WUServer)
+    Write-UiMetric -Label 'WUServer DNS' -Value $report['WSUSPosture'].WUServerResolution -Tone (Get-StatusTone $report['WSUSPosture'].WUServerResolution)
+    Write-UiMetric -Label 'WUStatusServer' -Value $report['WSUSPosture'].WUStatusServer -Tone (Get-StatusTone $report['WSUSPosture'].WUStatusServer)
+    Write-UiMetric -Label 'WUStatus DNS' -Value $report['WSUSPosture'].StatusResolution -Tone (Get-StatusTone $report['WSUSPosture'].StatusResolution)
+    Write-UiMetric -Label 'Target group' -Value $report['WSUSPosture'].TargetGroup -Tone (Get-StatusTone $report['WSUSPosture'].TargetGroup)
+    Write-UiMetric -Label 'Target enabled' -Value $report['WSUSPosture'].TargetGroupEnabled -Tone (Get-StatusTone $report['WSUSPosture'].TargetGroupEnabled)
+    Write-UiMetric -Label 'Dual scan' -Value $report['WSUSPosture'].DualScanPolicy -Tone (Get-StatusTone $report['WSUSPosture'].DualScanPolicy)
+    Write-UiMetric -Label 'Online WU disabled' -Value $report['WSUSPosture'].DoNotConnect -Tone (Get-StatusTone $report['WSUSPosture'].DoNotConnect)
+    Write-UiMetric -Label 'Source policies' -Value $report['WSUSPosture'].SourcePolicy -Tone (Get-StatusTone $report['WSUSPosture'].SourcePolicy)
+    foreach ($wsusIssue in $report['WSUSPosture'].Issues) {
+        Write-UiMetric -Label 'WSUS issue' -Value $wsusIssue -Tone 'Warning'
+    }
+
     Write-UiSubheading -Title 'Repair signals'
     $infoRows = @(
         @{ Label = 'SoftwareDistribution'; Value = $report['SoftwareDistribution'] },
@@ -1379,6 +1547,20 @@ function Get-DiagnosticReport {
     Write-Log "Delivery Optimization Bytes From Peers: $($report['DeliveryOptimization'].BytesFromPeers)"
     Write-Log "Delivery Optimization Bytes To Peers: $($report['DeliveryOptimization'].BytesToPeers)"
     Write-Log "Delivery Optimization Peer Count: $($report['DeliveryOptimization'].PeerCount)"
+    Write-Log "WSUS/SUP Posture: $($report['WSUSPosture'].PostureSummary)"
+    Write-Log "UseWUServer: $($report['WSUSPosture'].UseWUServer)"
+    Write-Log "WUServer: $($report['WSUSPosture'].WUServer)"
+    Write-Log "WUServer DNS: $($report['WSUSPosture'].WUServerResolution)"
+    Write-Log "WUStatusServer: $($report['WSUSPosture'].WUStatusServer)"
+    Write-Log "WUStatusServer DNS: $($report['WSUSPosture'].StatusResolution)"
+    Write-Log "TargetGroup: $($report['WSUSPosture'].TargetGroup)"
+    Write-Log "TargetGroupEnabled: $($report['WSUSPosture'].TargetGroupEnabled)"
+    Write-Log "DualScanPolicy: $($report['WSUSPosture'].DualScanPolicy)"
+    Write-Log "DoNotConnectToWindowsUpdateInternetLocations: $($report['WSUSPosture'].DoNotConnect)"
+    Write-Log "Policy-driven update sources: $($report['WSUSPosture'].SourcePolicy)"
+    foreach ($wsusIssue in $report['WSUSPosture'].Issues) {
+        Write-Log "WSUS/SUP Issue: $wsusIssue" -Level WARNING
+    }
     Write-Log "SoftwareDistribution: $($report['SoftwareDistribution'])"
     Write-Log "catroot2: $($report['Catroot2'])"
     Write-Log "DISM Health: $($report['DISMHealth'])"
@@ -2329,6 +2511,9 @@ function Show-BeforeAfterComparison {
         @{ Key = 'UpdateHealthToolsStatus'; Label = 'Update Health Tools' },
         @{ Key = 'UpdateHealthServiceStatus'; Label = 'Update Health service' },
         @{ Key = 'RemediationServiceStatus'; Label = 'Remediation service' },
+        @{ Key = 'WSUSPostureSummary'; Label = 'WSUS / SUP posture' },
+        @{ Key = 'UseWUServer'; Label = 'UseWUServer' },
+        @{ Key = 'DualScanPolicy'; Label = 'Dual scan policy' },
         @{ Key = 'DeliveryOptimizationMode'; Label = 'DO download mode' },
         @{ Key = 'DeliveryOptimizationPeerCache'; Label = 'DO peer cache' },
         @{ Key = 'SoftwareDistribution'; Label = 'SoftwareDistribution' },

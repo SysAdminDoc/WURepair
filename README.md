@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.4.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.5.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -55,6 +55,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Ranked HRESULT Summary**: Parses `%WINDIR%\WindowsUpdate.log` and converted Windows Update ETW traces into the top 10 recurring error codes with Microsoft reference links
 - **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
 - **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
+- **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, and policy-driven update-source settings
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
@@ -72,7 +73,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.4.0
+    Windows Update Repair Tool v2.5.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -260,7 +261,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.4.0 Flow                       │
+│                      WURepair v2.5.0 Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -304,6 +305,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.5.0
+- Added WSUS / SUP posture diagnostics for `WUServer`, `WUStatusServer`, target groups, `UseWUServer`, dual-scan, and policy-driven update source settings
+- Added DNS resolution summaries and posture warnings for mismatched or incomplete WSUS policy state
 
 ### v2.4.0
 - Added Microsoft Update Health Tools / Windows Remediation detection
