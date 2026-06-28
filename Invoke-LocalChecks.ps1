@@ -43,6 +43,8 @@ $testBatches = @(
         '*waits for service*',
         '*wraps sc.exe*',
         '*parses Catalog*',
+        '*validates Catalog*',
+        '*rejects Catalog*',
         '*parses DISM*'
     )
 )

@@ -45,6 +45,7 @@ Describe 'WURepair static contract' {
             'Wait-WUServiceState',
             'Invoke-WUServiceControl',
             'Convert-WUCatalogHtmlText',
+            'Test-WUCatalogPackageValidation',
             'Convert-WUSizeToMegabyte',
             'Get-ComponentStoreAnalysis'
         )
@@ -65,6 +66,7 @@ Describe 'WURepair static contract' {
         $Script:WUErrorArticleMap = @{
             '0x80240016' = 'https://learn.microsoft.com/test/80240016'
         }
+        $Script:CatalogPackageValidationResults = @()
     }
 
     AfterAll {
@@ -88,10 +90,13 @@ Describe 'WURepair static contract' {
             'Wait-WUServiceState',
             'Invoke-WUServiceControl',
             'Convert-WUCatalogHtmlText',
+            'Test-WUCatalogPackageValidation',
             'Convert-WUSizeToMegabyte',
             'Get-ComponentStoreAnalysis',
             'sc.exe',
-            'DISM'
+            'DISM',
+            'Get-FileHash',
+            'Get-AuthenticodeSignature'
         ) | ForEach-Object {
             if (Test-Path -LiteralPath "Function:\$_") {
                 Remove-Item -LiteralPath "Function:\$_" -Force
@@ -242,6 +247,53 @@ Describe 'WURepair static contract' {
         Convert-WUSizeToMegabyte -SizeText '1.5 GB' | Should -Be 1536
         Convert-WUSizeToMegabyte -SizeText '512 KB' | Should -Be 0.5
         Convert-WUSizeToMegabyte -SizeText '1,5 GB' | Should -Be 1536
+    }
+
+    It 'validates Catalog packages with Microsoft signature and SHA256 hash' {
+        Mock Test-Path { $true }
+        Mock Get-Item { [PSCustomObject]@{ Length = 4096 } }
+        function global:Get-FileHash {
+            [PSCustomObject]@{ Hash = 'ABCDEF123456' }
+        }
+        function global:Get-AuthenticodeSignature {
+            [PSCustomObject]@{
+                Status            = 'Valid'
+                StatusMessage     = 'Signature verified.'
+                SignerCertificate = [PSCustomObject]@{
+                    Subject = 'CN=Microsoft Windows'
+                    Issuer  = 'CN=Microsoft Code Signing PCA'
+                }
+            }
+        }
+
+        $result = Test-WUCatalogPackageValidation -Path (Join-Path $TestDrive 'package.msu') -SourceUrl 'https://catalog.test/package.msu'
+
+        $result.IsValid | Should -BeTrue
+        $result.SHA256 | Should -Be 'ABCDEF123456'
+        $result.IsMicrosoftSigned | Should -BeTrue
+        @($Script:CatalogPackageValidationResults).Count | Should -Be 1
+    }
+
+    It 'rejects Catalog packages when Authenticode validation fails' {
+        Mock Test-Path { $true }
+        Mock Get-Item { [PSCustomObject]@{ Length = 4096 } }
+        function global:Get-FileHash {
+            [PSCustomObject]@{ Hash = 'ABCDEF123456' }
+        }
+        function global:Get-AuthenticodeSignature {
+            [PSCustomObject]@{
+                Status            = 'NotSigned'
+                StatusMessage     = 'No signature was present.'
+                SignerCertificate = $null
+            }
+        }
+
+        $result = Test-WUCatalogPackageValidation -Path (Join-Path $TestDrive 'package.msu')
+
+        $result.IsValid | Should -BeFalse
+        $result.AuthenticodeStatus | Should -Be 'NotSigned'
+        $result.IsMicrosoftSigned | Should -BeFalse
+        @($Script:CatalogPackageValidationResults).Count | Should -Be 1
     }
 
     It 'parses DISM AnalyzeComponentStore output through a mocked DISM process' {

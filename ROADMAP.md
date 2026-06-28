@@ -63,13 +63,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 
 ## Research-Driven Additions
 
-- [ ] P1 - Verify Catalog downloads before installing SSU packages
-  Why: The Catalog repair path downloads elevated installers and should verify signature/catalog/hash before invoking `wusa.exe`.
-  Evidence: `WURepair.ps1:2931`, `WURepair.ps1:2941`; Microsoft `about_Signing`; `Test-FileCatalog` docs.
-  Touches: `Invoke-MicrosoftUpdateCatalogDownload`, `Invoke-ServicingStackMsuInstall`, logging/reporting.
-  Acceptance: Downloaded `.msu` files are Authenticode/catalog validated, optionally hash-recorded in JSON, and skipped with a clear error when validation fails.
-  Complexity: M
-
 - [ ] P1 - Add managed update-source guardrails before policy removal
   Why: Enterprise WSUS/SUP/WUfB/Intune devices can have valid policy; WURepair should not remove managed source policy without an explicit repair mode.
   Evidence: current WSUS diagnostics in `WURepair.ps1:1197`; policy removal in `WURepair.ps1:1896`; Microsoft Intune remediations and Windows Update for Business guidance.
