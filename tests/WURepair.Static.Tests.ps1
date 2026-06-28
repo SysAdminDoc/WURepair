@@ -1,4 +1,4 @@
-Describe 'WURepair static contract' {
+﻿Describe 'WURepair static contract' {
     BeforeAll {
         $script:RepoRoot = Split-Path -Parent $PSScriptRoot
         $script:ScriptPath = Join-Path $script:RepoRoot 'WURepair.ps1'
@@ -27,6 +27,10 @@ Describe 'WURepair static contract' {
 
         Import-WURepairFunction -Name @(
             'Write-Log',
+            'Write-UiList',
+            'Write-UiMetric',
+            'Write-UiSubheading',
+            'Show-Banner',
             'Initialize-WUMutationJournal',
             'Save-WUMutationJournal',
             'Get-WUMutationJournalSummary',
@@ -68,6 +72,7 @@ Describe 'WURepair static contract' {
             LogPath                            = Join-Path $TestDrive 'WURepair.log'
             TempPath                           = Join-Path $TestDrive 'Temp'
             Unattended                         = $true
+            PlainText                          = $false
             ComponentStoreResetBaseThresholdMB = 1024
             Ui                                 = @{}
         }
@@ -84,6 +89,10 @@ Describe 'WURepair static contract' {
     AfterAll {
         @(
             'Write-Log',
+            'Write-UiList',
+            'Write-UiMetric',
+            'Write-UiSubheading',
+            'Show-Banner',
             'Initialize-WUMutationJournal',
             'Save-WUMutationJournal',
             'Get-WUMutationJournalSummary',
@@ -151,6 +160,33 @@ Describe 'WURepair static contract' {
         $script:Content | Should -Match '\$Script:ExitCodes'
         $script:Content | Should -Match 'ConnectivityFailure'
         $script:Content | Should -Match 'exit \$exitCode'
+    }
+
+    It 'emits plain text status lines without colors or progress chrome' {
+        $Script:Config.Unattended = $false
+        $Script:Config.PlainText = $true
+        $Script:Config.Version = '9.9.9-test'
+        $script:HostLines = @()
+        Mock Write-Host {
+            param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Object)
+            $script:HostLines += (($Object | ForEach-Object { [string]$_ }) -join ' ')
+        }
+        Mock Clear-Host { throw 'Clear-Host should not run in plain text mode.' }
+
+        Show-Banner
+        Write-Log 'Plain output started'
+        Write-Log 'Plain section' -Level SECTION
+        Write-UiMetric -Label 'Mode' -Value 'PlainText'
+        Write-UiList -Title 'Items' -Items @('First item')
+
+        $output = $script:HostLines -join "`n"
+        $output | Should -Match 'WURepair v9.9.9-test'
+        $output | Should -Match '\[INFO\] Plain output started'
+        $output | Should -Match '== Plain section =='
+        $output | Should -Match 'Mode: PlainText'
+        $output | Should -Match '- First item'
+        $output | Should -Not -Match '\[OK\]|\[!\]'
+        Should -Invoke Clear-Host -Times 0 -Exactly
     }
 
     It 'wires mutation journals and rollback entry points' {

@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.16.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.17.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -67,6 +67,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
 - **Support Bundle**: Optional `-SupportBundle <path>` writes a redacted zip with WURepair logs, JSON report, Windows Update log, event exports, and CBS/DISM tails
 - **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
+- **Plain Text Output**: Optional `-PlainText` emits deterministic ASCII status lines for RMM consoles, screen readers, and log capture
 - **Mutation Journal & Rollback**: Writes a per-run JSON journal of hosts, registry, policy, and cache mutations; `-RollbackJournal` previews/apply reversible changes
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
 - **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
@@ -82,7 +83,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.16.0
+    Windows Update Repair Tool v2.17.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -151,6 +152,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
 | `-ResetManagedUpdatePolicy` | Remove managed WSUS/SUP/WUfB source policy values intentionally; default repair preserves them |
 | `-NoRedact` | Keep usernames, device names, profile paths, and SIDs in support bundles |
+| `-PlainText` | Emit deterministic ASCII output and suppress progress rendering |
 | `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
 | `-Help` | Display help information |
 
@@ -216,6 +218,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Full repair with a redacted support bundle
 .\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip
+
+# Plain-text output for RMM consoles or screen readers
+.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json
 
 # RMM-safe run with no host UI and stable exit code
 .\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
@@ -333,7 +338,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.16.0 Flow                      │
+│                      WURepair v2.17.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -381,6 +386,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.17.0
+- Added `-PlainText` deterministic ASCII console output for automation logs and screen readers
+- Plain-text mode suppresses progress rendering and color-only status while preserving log file output
 
 ### v2.16.0
 - Added `-SupportBundle <path>` to create redacted diagnostic zip archives

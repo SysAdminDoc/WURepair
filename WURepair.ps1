@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.17.0 adds plain-text automation output.
     v2.16.0 adds redacted support bundle generation.
     v2.15.0 adds managed update-source guardrails before policy removal.
     v2.14.0 validates Microsoft Update Catalog downloads before install.
@@ -29,7 +30,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.16.0
+    Version: 2.17.0
 #>
 
 #Requires -RunAsAdministrator
@@ -45,11 +46,12 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.16.0'
+    Version                            = '2.17.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
     Unattended                         = $false
+    PlainText                          = $false
     JournalPath                        = "$env:USERPROFILE\Desktop\WURepair_Journal_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     Ui                                 = @{
         AccentColor   = 'Cyan'
@@ -259,6 +261,11 @@ function Write-UiRule {
         $Width = [Math]::Min(80, (Get-UiWidth) - ($Indent + 2))
     }
 
+    if ($Script:Config.PlainText) {
+        Write-Host ((' ' * $Indent) + ('-' * $Width))
+        return
+    }
+
     Write-Host ((' ' * $Indent) + ($Character * $Width)) -ForegroundColor (Get-UiColor $Tone)
 }
 
@@ -270,6 +277,15 @@ function Write-UiHeader {
     )
 
     if ($Script:Config.Unattended) { return }
+
+    if ($Script:Config.PlainText) {
+        Write-Host ''
+        Write-Host ("== {0} ==" -f $Title)
+        if ($Subtitle) {
+            Write-Host $Subtitle
+        }
+        return
+    }
 
     Write-Host ''
     Write-UiRule -Tone $Tone -Character '═'
@@ -285,6 +301,12 @@ function Write-UiSubheading {
 
     if ($Script:Config.Unattended) { return }
 
+    if ($Script:Config.PlainText) {
+        Write-Host ''
+        Write-Host ("-- {0} --" -f $Title)
+        return
+    }
+
     Write-Host ''
     Write-Host ("  {0}" -f $Title) -ForegroundColor (Get-UiColor 'Title')
     Write-UiRule -Tone 'Muted' -Width ([Math]::Min(36, [Math]::Max(16, $Title.Length + 6)))
@@ -299,6 +321,11 @@ function Write-UiMetric {
     )
 
     if ($Script:Config.Unattended) { return }
+
+    if ($Script:Config.PlainText) {
+        Write-Host ("{0}: {1}" -f $Label, $Value)
+        return
+    }
 
     $safeWidth = [Math]::Max(16, $LabelWidth)
     Write-Host ("  {0}" -f (Format-UiCell -Text $Label -Width $safeWidth)) -ForegroundColor (Get-UiColor 'Muted') -NoNewline
@@ -317,6 +344,11 @@ function Write-UiComparisonLine {
     )
 
     if ($Script:Config.Unattended) { return }
+
+    if ($Script:Config.PlainText) {
+        Write-Host ("{0}: {1} -> {2}" -f $Label, $Before, $After)
+        return
+    }
 
     Write-Host ("  {0}" -f (Format-UiCell -Text $Label -Width $LabelWidth)) -ForegroundColor (Get-UiColor 'Muted') -NoNewline
     Write-Host '  ' -NoNewline
@@ -340,6 +372,10 @@ function Write-UiList {
 
     foreach ($item in $Items) {
         if (-not [string]::IsNullOrWhiteSpace($item)) {
+            if ($Script:Config.PlainText) {
+                Write-Host ("- {0}" -f $item)
+                continue
+            }
             Write-Host ("  • {0}" -f $item) -ForegroundColor (Get-UiColor $Tone)
         }
     }
@@ -353,6 +389,15 @@ function Write-UiCallout {
     )
 
     if ($Script:Config.Unattended) { return }
+
+    if ($Script:Config.PlainText) {
+        Write-Host ''
+        Write-Host ("[{0}] {1}" -f $Tone.ToUpper(), $Title)
+        foreach ($line in $Lines) {
+            Write-Host ("  {0}" -f $line)
+        }
+        return
+    }
 
     Write-Host ''
     Write-Host ("  [{0}] {1}" -f $Tone.ToUpper(), $Title) -ForegroundColor (Get-UiColor $Tone)
@@ -466,29 +511,42 @@ function Write-Log {
     }
 
     if (-not $Script:Config.Unattended) {
-    switch ($Level) {
-        'SECTION' {
-            Write-UiHeader -Title $Message -Tone 'Section'
-        }
-        'SUCCESS' {
-            Write-Host ("  [OK] {0}" -f $Message) -ForegroundColor (Get-UiColor 'Success')
-        }
-        'WARNING' {
-            Write-Host ("  [!]  {0}" -f $Message) -ForegroundColor (Get-UiColor 'Warning')
-        }
-        'ERROR' {
-            Write-Host ("  [X]  {0}" -f $Message) -ForegroundColor (Get-UiColor 'Error')
-        }
-        default {
+        if ($Script:Config.PlainText) {
             if ([string]::IsNullOrWhiteSpace($Message)) {
                 Write-Host ''
             }
+            elseif ($Level -eq 'SECTION') {
+                Write-Host ''
+                Write-Host ("== {0} ==" -f $Message)
+            }
             else {
-                Write-Host ("  • {0}" -f $Message) -ForegroundColor (Get-UiColor 'Info')
+                Write-Host ("[{0}] {1}" -f $Level, $Message)
             }
         }
-    }
-
+        else {
+            switch ($Level) {
+                'SECTION' {
+                    Write-UiHeader -Title $Message -Tone 'Section'
+                }
+                'SUCCESS' {
+                    Write-Host ("  [OK] {0}" -f $Message) -ForegroundColor (Get-UiColor 'Success')
+                }
+                'WARNING' {
+                    Write-Host ("  [!]  {0}" -f $Message) -ForegroundColor (Get-UiColor 'Warning')
+                }
+                'ERROR' {
+                    Write-Host ("  [X]  {0}" -f $Message) -ForegroundColor (Get-UiColor 'Error')
+                }
+                default {
+                    if ([string]::IsNullOrWhiteSpace($Message)) {
+                        Write-Host ''
+                    }
+                    else {
+                        Write-Host ("  • {0}" -f $Message) -ForegroundColor (Get-UiColor 'Info')
+                    }
+                }
+            }
+        }
     }
 
     Add-Content -Path $Script:Config.LogPath -Value $logMessage -ErrorAction SilentlyContinue
@@ -898,6 +956,12 @@ function Invoke-WUMutationRollback {
 
 function Show-Banner {
     if ($Script:Config.Unattended) { return }
+
+    if ($Script:Config.PlainText) {
+        Write-Host ("WURepair v{0}" -f $Script:Config.Version)
+        Write-Host 'Repair Windows Update with guided diagnostics, safer defaults, and clearer next steps.'
+        return
+    }
 
     Clear-Host
     Write-Host ''
@@ -4574,10 +4638,12 @@ function Start-WURepair {
         [switch]$ApplyRollback,
         [switch]$ResetManagedUpdatePolicy,
         [switch]$NoRedact,
+        [switch]$PlainText,
         [switch]$Unattended
     )
 
     $Script:Config.Unattended = [bool]$Unattended
+    $Script:Config.PlainText = [bool]$PlainText
     Show-Banner
 
     if (-not (Test-AdminRights)) {
@@ -4817,7 +4883,7 @@ function Start-WURepair {
         $currentPhase++
         $pct = [int](($currentPhase / $totalPhases) * 100)
         $phaseStart = Get-Date
-        if (-not $Script:Config.Unattended) {
+        if (-not $Script:Config.Unattended -and -not $Script:Config.PlainText) {
             Write-Progress -Activity "WURepair v$($Script:Config.Version)" `
                 -Status "Phase $currentPhase of $totalPhases : $($phase.Name)" `
                 -PercentComplete $pct
@@ -4860,7 +4926,7 @@ function Start-WURepair {
         $Script:CurrentPhaseTelemetry = $null
     }
 
-    if (-not $Script:Config.Unattended) {
+    if (-not $Script:Config.Unattended -and -not $Script:Config.PlainText) {
         Write-Progress -Activity "WURepair v$($Script:Config.Version)" -Completed
     }
 
@@ -4929,6 +4995,7 @@ function Start-WURepair {
         StageSSU              = [bool]$StageSSU
         RepairAll             = [bool]$RepairAll
         Unattended            = [bool]$Unattended
+        PlainText             = [bool]$PlainText
         ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
         SupportBundle         = $SupportBundle
         NoRedact              = [bool]$NoRedact
@@ -5004,6 +5071,7 @@ function Show-Help {
         '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
         '-ResetManagedUpdatePolicy  Remove WSUS/SUP/WUfB source policy values intentionally.',
         '-NoRedact             Keep usernames, device names, paths, and SIDs in support bundles.',
+        '-PlainText            Emit deterministic ASCII output and suppress progress rendering.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
         '-Help                 Show this help screen.'
     )
@@ -5029,6 +5097,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip',
+        '.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -ResetManagedUpdatePolicy',
         '.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json',
@@ -5089,6 +5158,7 @@ if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Conf
 if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
 if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePolicy'] = $true }
 if ($args -contains '-NoRedact') { $params['NoRedact'] = $true }
+if ($args -contains '-PlainText') { $params['PlainText'] = $true; $Script:Config.PlainText = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
