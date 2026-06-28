@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.4.0 adds Microsoft Update Health Tools and remediation detection.
     v2.3.0 adds WaaSMedic and Delivery Optimization health diagnostics.
     v2.2.0 adds ranked Windows Update HRESULT summaries from WindowsUpdate.log
     and converted ETW traces.
@@ -16,7 +17,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.3.0
+    Version: 2.4.0
 #>
 
 #Requires -RunAsAdministrator
@@ -32,7 +33,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.3.0'
+    Version        = '2.4.0'
     EventSource    = 'WURepair'
     Ui             = @{
         AccentColor   = 'Cyan'
@@ -962,6 +963,125 @@ function Get-DeliveryOptimizationDiagnostic {
     }
 }
 
+function Get-UpdateHealthToolDiagnostic {
+    $installPaths = New-Object 'System.Collections.Generic.List[string]'
+    $uninstallEntries = New-Object 'System.Collections.Generic.List[object]'
+    $versions = New-Object 'System.Collections.Generic.List[string]'
+
+    $candidatePaths = @(
+        "$env:ProgramFiles\Microsoft Update Health Tools",
+        "${env:ProgramFiles(x86)}\Microsoft Update Health Tools",
+        "$env:ProgramFiles\rempl",
+        "${env:ProgramFiles(x86)}\rempl"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    foreach ($candidatePath in $candidatePaths) {
+        try {
+            if (Test-Path -LiteralPath $candidatePath -ErrorAction Stop) {
+                [void]$installPaths.Add($candidatePath)
+                $exe = Get-ChildItem -LiteralPath $candidatePath -Filter '*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($exe) {
+                    $fileVersion = $exe.VersionInfo.ProductVersion
+                    if ([string]::IsNullOrWhiteSpace($fileVersion)) {
+                        $fileVersion = $exe.VersionInfo.FileVersion
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($fileVersion) -and -not $versions.Contains($fileVersion)) {
+                        [void]$versions.Add($fileVersion)
+                    }
+                }
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    $uninstallRoots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+
+    foreach ($root in $uninstallRoots) {
+        if (-not (Test-Path -LiteralPath $root)) {
+            continue
+        }
+
+        try {
+            foreach ($child in (Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+                $entry = Get-ItemProperty -LiteralPath $child.PSPath -ErrorAction SilentlyContinue
+                if ($entry.DisplayName -match 'Microsoft Update Health Tools|Update Health Tools|Windows Setup Remediations') {
+                    [void]$uninstallEntries.Add([PSCustomObject]@{
+                        DisplayName    = $entry.DisplayName
+                        DisplayVersion = $entry.DisplayVersion
+                        Publisher      = $entry.Publisher
+                    })
+                    if (-not [string]::IsNullOrWhiteSpace($entry.DisplayVersion) -and -not $versions.Contains([string]$entry.DisplayVersion)) {
+                        [void]$versions.Add([string]$entry.DisplayVersion)
+                    }
+                }
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    $healthService = Get-WUServiceStateLabel -ServiceName 'uhssvc'
+    $remediationService = Get-WUServiceStateLabel -ServiceName 'sedsvc'
+    $sedLauncherProcesses = @(Get-Process -Name 'sedlauncher' -ErrorAction SilentlyContinue)
+    $sedSvcProcesses = @(Get-Process -Name 'sedsvc' -ErrorAction SilentlyContinue)
+    $remediationProcesses = @(Get-Process -Name 'rempl', 'remsh', 'WaaSMedicAgent' -ErrorAction SilentlyContinue)
+
+    $remplTaskSummary = 'Not available'
+    try {
+        $tasks = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\rempl\' -ErrorAction SilentlyContinue)
+        if ($tasks.Count -gt 0) {
+            $ready = @($tasks | Where-Object { $_.State -eq 'Ready' }).Count
+            $running = @($tasks | Where-Object { $_.State -eq 'Running' }).Count
+            $disabled = @($tasks | Where-Object { $_.State -eq 'Disabled' }).Count
+            $remplTaskSummary = "$($tasks.Count) task(s), $ready ready, $running running, $disabled disabled"
+        }
+        else {
+            $remplTaskSummary = 'No rempl scheduled tasks found'
+        }
+    }
+    catch {
+        $remplTaskSummary = 'Unable to query scheduled tasks'
+    }
+
+    $installed = (
+        $installPaths.Count -gt 0 -or
+        $uninstallEntries.Count -gt 0 -or
+        $healthService -ne 'Not Found' -or
+        $remediationService -ne 'Not Found'
+    )
+
+    $presence = if ($installed) { 'Detected' } else { 'Not detected' }
+    $installPathText = if ($installPaths.Count -gt 0) { ($installPaths.ToArray() -join '; ') } else { 'Not found' }
+    $versionText = if ($versions.Count -gt 0) { ($versions.ToArray() -join ', ') } else { 'Unknown' }
+    $sedLauncherText = if ($sedLauncherProcesses.Count -gt 0) { "Running ($($sedLauncherProcesses.Count) process(es))" } else { 'Not running' }
+    $sedSvcProcessText = if ($sedSvcProcesses.Count -gt 0) { "Running ($($sedSvcProcesses.Count) process(es))" } else { 'Not running' }
+    $remediationProcessText = if ($remediationProcesses.Count -gt 0) {
+        (($remediationProcesses | Group-Object -Property ProcessName | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', ')
+    }
+    else {
+        'Not running'
+    }
+
+    return [PSCustomObject]@{
+        Presence                 = $presence
+        InstallPaths             = $installPathText
+        Versions                 = $versionText
+        PackageCount             = $uninstallEntries.Count
+        UpdateHealthService      = $healthService
+        RemediationService       = $remediationService
+        SedLauncherStatus        = $sedLauncherText
+        SedSvcProcessStatus      = $sedSvcProcessText
+        RemediationProcessStatus = $remediationProcessText
+        RemplTaskSummary         = $remplTaskSummary
+    }
+}
+
 # ============================================================================
 # DIAGNOSTIC PRE-CHECK REPORT
 # ============================================================================
@@ -1021,11 +1141,16 @@ function Get-DiagnosticReport {
     # -- WaaSMedic and Delivery Optimization diagnostics --
     $waaSMedic = Get-WaaSMedicDiagnostic
     $deliveryOptimization = Get-DeliveryOptimizationDiagnostic
+    $updateHealthTools = Get-UpdateHealthToolDiagnostic
     $report['WaaSMedic'] = $waaSMedic
     $report['DeliveryOptimization'] = $deliveryOptimization
+    $report['UpdateHealthTools'] = $updateHealthTools
     $report['WaaSMedicStatus'] = $waaSMedic.ServiceStatus
     $report['DeliveryOptimizationPeerCache'] = $deliveryOptimization.PeerCacheHealth
     $report['DeliveryOptimizationMode'] = $deliveryOptimization.DownloadMode
+    $report['UpdateHealthToolsStatus'] = $updateHealthTools.Presence
+    $report['UpdateHealthServiceStatus'] = $updateHealthTools.UpdateHealthService
+    $report['RemediationServiceStatus'] = $updateHealthTools.RemediationService
 
     # -- SoftwareDistribution folder --
     $sdPath = "$env:SystemRoot\SoftwareDistribution"
@@ -1156,10 +1281,18 @@ function Get-DiagnosticReport {
         Write-UiMetric -Label $svc.Component -Value $svc.Status -Tone (Get-StatusTone $svc.Status) -LabelWidth 34
     }
 
-    Write-UiSubheading -Title 'WaaSMedic and Delivery Optimization'
+    Write-UiSubheading -Title 'WaaSMedic, Update Health, and Delivery Optimization'
     Write-UiMetric -Label 'WaaSMedic service' -Value $report['WaaSMedic'].ServiceStatus -Tone (Get-StatusTone $report['WaaSMedic'].ServiceStatus)
     Write-UiMetric -Label 'WaaSMedic tasks' -Value $report['WaaSMedic'].TaskSummary -Tone (Get-StatusTone $report['WaaSMedic'].TaskSummary)
     Write-UiMetric -Label 'WaaSMedic events' -Value $report['WaaSMedic'].IssueSummary -Tone (Get-StatusTone $report['WaaSMedic'].IssueSummary)
+    Write-UiMetric -Label 'Update Health Tools' -Value $report['UpdateHealthTools'].Presence -Tone (Get-StatusTone $report['UpdateHealthTools'].Presence)
+    Write-UiMetric -Label 'Update Health version' -Value $report['UpdateHealthTools'].Versions -Tone 'Info'
+    Write-UiMetric -Label 'Update Health path' -Value $report['UpdateHealthTools'].InstallPaths -Tone (Get-StatusTone $report['UpdateHealthTools'].InstallPaths)
+    Write-UiMetric -Label 'Update Health service' -Value $report['UpdateHealthTools'].UpdateHealthService -Tone (Get-StatusTone $report['UpdateHealthTools'].UpdateHealthService)
+    Write-UiMetric -Label 'Remediation service' -Value $report['UpdateHealthTools'].RemediationService -Tone (Get-StatusTone $report['UpdateHealthTools'].RemediationService)
+    Write-UiMetric -Label 'sedlauncher' -Value $report['UpdateHealthTools'].SedLauncherStatus -Tone (Get-StatusTone $report['UpdateHealthTools'].SedLauncherStatus)
+    Write-UiMetric -Label 'sedsvc process' -Value $report['UpdateHealthTools'].SedSvcProcessStatus -Tone (Get-StatusTone $report['UpdateHealthTools'].SedSvcProcessStatus)
+    Write-UiMetric -Label 'rempl tasks' -Value $report['UpdateHealthTools'].RemplTaskSummary -Tone (Get-StatusTone $report['UpdateHealthTools'].RemplTaskSummary)
     Write-UiMetric -Label 'DO service' -Value $report['DeliveryOptimization'].ServiceStatus -Tone (Get-StatusTone $report['DeliveryOptimization'].ServiceStatus)
     Write-UiMetric -Label 'DO download mode' -Value $report['DeliveryOptimization'].DownloadMode -Tone (Get-StatusTone $report['DeliveryOptimization'].DownloadMode)
     Write-UiMetric -Label 'DO peer cache' -Value $report['DeliveryOptimization'].PeerCacheHealth -Tone (Get-StatusTone $report['DeliveryOptimization'].PeerCacheHealth)
@@ -1227,6 +1360,15 @@ function Get-DiagnosticReport {
     foreach ($medicIssue in $report['WaaSMedic'].RecentIssues) {
         Write-Log "WaaSMedic Event: [$($medicIssue.Time)] $($medicIssue.LogName) - $($medicIssue.Message)"
     }
+    Write-Log "Update Health Tools: $($report['UpdateHealthTools'].Presence)"
+    Write-Log "Update Health Tools Versions: $($report['UpdateHealthTools'].Versions)"
+    Write-Log "Update Health Tools Paths: $($report['UpdateHealthTools'].InstallPaths)"
+    Write-Log "Update Health Service: $($report['UpdateHealthTools'].UpdateHealthService)"
+    Write-Log "Windows Remediation Service: $($report['UpdateHealthTools'].RemediationService)"
+    Write-Log "sedlauncher: $($report['UpdateHealthTools'].SedLauncherStatus)"
+    Write-Log "sedsvc process: $($report['UpdateHealthTools'].SedSvcProcessStatus)"
+    Write-Log "Remediation processes: $($report['UpdateHealthTools'].RemediationProcessStatus)"
+    Write-Log "rempl tasks: $($report['UpdateHealthTools'].RemplTaskSummary)"
     Write-Log "Delivery Optimization Service: $($report['DeliveryOptimization'].ServiceStatus)"
     Write-Log "Delivery Optimization Mode: $($report['DeliveryOptimization'].DownloadMode)"
     Write-Log "Delivery Optimization Peer Cache: $($report['DeliveryOptimization'].PeerCacheHealth)"
@@ -2184,6 +2326,9 @@ function Show-BeforeAfterComparison {
     $compareKeys = @(
         @{ Key = 'HostsStatus'; Label = 'Hosts file' },
         @{ Key = 'WaaSMedicStatus'; Label = 'WaaSMedic service' },
+        @{ Key = 'UpdateHealthToolsStatus'; Label = 'Update Health Tools' },
+        @{ Key = 'UpdateHealthServiceStatus'; Label = 'Update Health service' },
+        @{ Key = 'RemediationServiceStatus'; Label = 'Remediation service' },
         @{ Key = 'DeliveryOptimizationMode'; Label = 'DO download mode' },
         @{ Key = 'DeliveryOptimizationPeerCache'; Label = 'DO peer cache' },
         @{ Key = 'SoftwareDistribution'; Label = 'SoftwareDistribution' },
