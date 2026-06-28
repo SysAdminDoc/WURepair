@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.8.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.9.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -50,6 +50,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Catroot2 Reset**: Clears cryptographic catalog cache
 - **DLL Re-registration**: Re-registers 35+ Windows Update DLLs
 - **DISM Integration**: Repairs component store corruption
+- **Component Store Analysis**: Parses `DISM /AnalyzeComponentStore` and uses `/ResetBase` only when cleanup is recommended and reclaimable data is at least 1024 MB
 - **Servicing Stack Preflight**: Optional `-StageSSU` path downloads and installs an applicable Servicing Stack Update before DISM
 - **SFC Integration**: Scans and repairs system file integrity
 
@@ -76,7 +77,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.8.0
+    Windows Update Repair Tool v2.9.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -270,7 +271,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.8.0 Flow                       │
+│                      WURepair v2.9.0 Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -286,7 +287,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 │ 12. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
 │ 13. Reset Windows Update Agent                                  │
 │ 14. Optional SSU staging before DISM (-StageSSU)                │
-│ 15. Run DISM (component store repair)                          │
+│ 15. Run DISM + analyzed component cleanup                      │
 │ 16. Run SFC (system file check)                                │
 │ 17. Start Update Services                                       │
 │ 18. Refresh Group Policy                                        │
@@ -302,7 +303,7 @@ Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows
 - ✅ **No data collection** - Everything runs locally
 - ✅ **No external downloads by default** - `-StageSSU` is opt-in and uses Windows Update Agent only
 - ✅ **Open source** - Full source code available for review
-- ✅ **Creates backups** - All changes can be reversed
+- ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
 - ✅ **Restore point** - System restore point created automatically
 - ✅ **Detailed logging** - Full audit trail saved to Desktop
 
@@ -315,6 +316,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.9.0
+- Added `DISM /AnalyzeComponentStore` parsing before component cleanup
+- `StartComponentCleanup /ResetBase` now runs only when cleanup is recommended and reclaimable component-store data is at least 1024 MB
 
 ### v2.8.0
 - Added optional `-StageSSU` / `-StageServicingStack` preflight before DISM
