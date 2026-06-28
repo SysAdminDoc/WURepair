@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.15.0 adds managed update-source guardrails before policy removal.
     v2.14.0 validates Microsoft Update Catalog downloads before install.
     v2.13.0 adds mutation journaling and rollback support.
     v2.12.0 adds unattended mode with automation exit codes.
@@ -27,7 +28,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.14.0
+    Version: 2.15.0
 #>
 
 #Requires -RunAsAdministrator
@@ -43,7 +44,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.14.0'
+    Version                            = '2.15.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -1222,6 +1223,75 @@ function Format-WUPolicyValue {
     return [string]$Value
 }
 
+function Test-WUConfiguredPolicyValue {
+    param([AllowNull()][object]$Value)
+
+    return ($null -ne $Value -and -not [string]::IsNullOrWhiteSpace([string]$Value))
+}
+
+function Get-WUManagedUpdateSourceGuardrail {
+    param(
+        [AllowNull()][object]$WUServer,
+        [AllowNull()][object]$WUStatusServer,
+        [AllowNull()][object]$UseWUServer,
+        [AllowNull()][object]$TargetGroup,
+        [AllowNull()][object]$TargetGroupEnabled,
+        [AllowNull()][object]$DisableDualScan,
+        [AllowNull()][object]$DoNotConnect,
+        [AllowNull()][object]$SetQualitySource,
+        [AllowNull()][object]$SetFeatureSource,
+        [AllowNull()][object]$SetDriverSource,
+        [AllowNull()][object]$SetOtherSource
+    )
+
+    $indicators = New-Object 'System.Collections.Generic.List[string]'
+
+    if ((Test-WUConfiguredPolicyValue -Value $WUServer) -or (Test-WUConfiguredPolicyValue -Value $WUStatusServer)) {
+        [void]$indicators.Add('WSUS/SUP server policy present')
+    }
+
+    if ($UseWUServer -eq 1) {
+        [void]$indicators.Add('UseWUServer enabled')
+    }
+
+    if ($TargetGroupEnabled -eq 1 -or (Test-WUConfiguredPolicyValue -Value $TargetGroup)) {
+        [void]$indicators.Add('WSUS/SUP target group policy present')
+    }
+
+    if ($null -ne $DisableDualScan) {
+        [void]$indicators.Add("DisableDualScan=$DisableDualScan")
+    }
+
+    $sourcePolicies = @(
+        @{ Label = 'Quality'; Value = $SetQualitySource },
+        @{ Label = 'Feature'; Value = $SetFeatureSource },
+        @{ Label = 'Driver'; Value = $SetDriverSource },
+        @{ Label = 'Other'; Value = $SetOtherSource }
+    )
+    foreach ($sourcePolicy in $sourcePolicies) {
+        if (Test-WUConfiguredPolicyValue -Value $sourcePolicy.Value) {
+            [void]$indicators.Add("WUfB $($sourcePolicy.Label) source=$($sourcePolicy.Value)")
+        }
+    }
+
+    if ($DoNotConnect -eq 1 -and $indicators.Count -gt 0) {
+        [void]$indicators.Add('Online Windows Update access disabled as part of source policy')
+    }
+
+    $reason = if ($indicators.Count -gt 0) {
+        $indicators.ToArray() -join '; '
+    }
+    else {
+        'No managed update-source policy detected'
+    }
+
+    return [PSCustomObject]@{
+        IsManagedSource = ($indicators.Count -gt 0)
+        Reason          = $reason
+        Indicators      = $indicators.ToArray()
+    }
+}
+
 function Get-WUNumericPropertyValue {
     param(
         [AllowNull()][object]$InputObject,
@@ -1670,6 +1740,19 @@ function Get-WSUSPostureDiagnostic {
         'Not configured'
     }
 
+    $managedSourceGuardrail = Get-WUManagedUpdateSourceGuardrail `
+        -WUServer $wuServer `
+        -WUStatusServer $wuStatusServer `
+        -UseWUServer $useWUServer `
+        -TargetGroup $targetGroup `
+        -TargetGroupEnabled $targetGroupEnabled `
+        -DisableDualScan $disableDualScan `
+        -DoNotConnect $doNotConnect `
+        -SetQualitySource $setQualitySource `
+        -SetFeatureSource $setFeatureSource `
+        -SetDriverSource $setDriverSource `
+        -SetOtherSource $setOtherSource
+
     $dualScanText = switch ([string]$disableDualScan) {
         '1' { 'Disabled by policy' }
         '0' { 'Allowed' }
@@ -1705,6 +1788,10 @@ function Get-WSUSPostureDiagnostic {
         DualScanPolicy       = $dualScanText
         DoNotConnect         = Format-WUPolicyValue -Value $doNotConnect
         SourcePolicy         = $sourcePolicySummary
+        IsManagedSource      = [bool]$managedSourceGuardrail.IsManagedSource
+        ManagedSourceReason  = $managedSourceGuardrail.Reason
+        ManagedSourceIndicators = $managedSourceGuardrail.Indicators
+        ManagedSourceGuardrail  = $managedSourceGuardrail
     }
 }
 
@@ -1946,6 +2033,7 @@ function Get-DiagnosticReport {
     Write-UiMetric -Label 'Dual scan' -Value $report['WSUSPosture'].DualScanPolicy -Tone (Get-StatusTone $report['WSUSPosture'].DualScanPolicy)
     Write-UiMetric -Label 'Online WU disabled' -Value $report['WSUSPosture'].DoNotConnect -Tone (Get-StatusTone $report['WSUSPosture'].DoNotConnect)
     Write-UiMetric -Label 'Source policies' -Value $report['WSUSPosture'].SourcePolicy -Tone (Get-StatusTone $report['WSUSPosture'].SourcePolicy)
+    Write-UiMetric -Label 'Managed guardrail' -Value $report['WSUSPosture'].ManagedSourceReason -Tone $(if ($report['WSUSPosture'].IsManagedSource) { 'Warning' } else { 'Success' })
     foreach ($wsusIssue in $report['WSUSPosture'].Issues) {
         Write-UiMetric -Label 'WSUS issue' -Value $wsusIssue -Tone 'Warning'
     }
@@ -2037,6 +2125,7 @@ function Get-DiagnosticReport {
     Write-Log "DualScanPolicy: $($report['WSUSPosture'].DualScanPolicy)"
     Write-Log "DoNotConnectToWindowsUpdateInternetLocations: $($report['WSUSPosture'].DoNotConnect)"
     Write-Log "Policy-driven update sources: $($report['WSUSPosture'].SourcePolicy)"
+    Write-Log "Managed update-source guardrail: $($report['WSUSPosture'].ManagedSourceReason)"
     foreach ($wsusIssue in $report['WSUSPosture'].Issues) {
         Write-Log "WSUS/SUP Issue: $wsusIssue" -Level WARNING
     }
@@ -2325,31 +2414,71 @@ function Repair-ServiceDependencies {
 # ============================================================================
 
 function Repair-UpdatePolicies {
+    param([switch]$ResetManagedUpdatePolicy)
+
     Write-Log "POLICIES - Removing Windows Update Restrictions" -Level SECTION
+
+    $wuPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $auPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+    $managedGuardrail = Get-WUManagedUpdateSourceGuardrail `
+        -WUServer (Get-WURegistryValue -Path $wuPolicyPath -Name 'WUServer') `
+        -WUStatusServer (Get-WURegistryValue -Path $wuPolicyPath -Name 'WUStatusServer') `
+        -UseWUServer (Get-WURegistryValue -Path $auPolicyPath -Name 'UseWUServer') `
+        -TargetGroup (Get-WURegistryValue -Path $wuPolicyPath -Name 'TargetGroup') `
+        -TargetGroupEnabled (Get-WURegistryValue -Path $wuPolicyPath -Name 'TargetGroupEnabled') `
+        -DisableDualScan (Get-WURegistryValue -Path $wuPolicyPath -Name 'DisableDualScan') `
+        -DoNotConnect (Get-WURegistryValue -Path $wuPolicyPath -Name 'DoNotConnectToWindowsUpdateInternetLocations') `
+        -SetQualitySource (Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForQualityUpdates') `
+        -SetFeatureSource (Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForFeatureUpdates') `
+        -SetDriverSource (Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForDriverUpdates') `
+        -SetOtherSource (Get-WURegistryValue -Path $wuPolicyPath -Name 'SetPolicyDrivenUpdateSourceForOtherUpdates')
+    $preserveManagedSource = ($managedGuardrail.IsManagedSource -and -not $ResetManagedUpdatePolicy)
+
+    if ($managedGuardrail.IsManagedSource) {
+        if ($preserveManagedSource) {
+            Write-Log "Managed update-source policy detected; preserving source policy values. Reason: $($managedGuardrail.Reason)" -Level WARNING
+            Write-Log "Use -ResetManagedUpdatePolicy to remove WSUS/SUP/WUfB source policy values intentionally." -Level WARNING
+        }
+        else {
+            Write-Log "Managed update-source policy reset explicitly requested. Reason: $($managedGuardrail.Reason)" -Level WARNING
+        }
+    }
 
     # Registry paths that can block Windows Update
     $policiesToRemove = @(
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess' },
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations' },
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'WUServer' },
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'WUStatusServer' },
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'UseWUServer' },
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate' },
-        @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate' },
-        @{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate' },
-        @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess' }
+        @{ Path = $wuPolicyPath; Name = 'DisableWindowsUpdateAccess'; ManagedSource = $false },
+        @{ Path = $wuPolicyPath; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'WUServer'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'WUStatusServer'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'TargetGroup'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'TargetGroupEnabled'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'DisableDualScan'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForQualityUpdates'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForFeatureUpdates'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForDriverUpdates'; ManagedSource = $true },
+        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForOtherUpdates'; ManagedSource = $true },
+        @{ Path = $auPolicyPath; Name = 'UseWUServer'; ManagedSource = $true },
+        @{ Path = $auPolicyPath; Name = 'NoAutoUpdate'; ManagedSource = $false },
+        @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate'; ManagedSource = $false },
+        @{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate'; ManagedSource = $false },
+        @{ Path = $wuPolicyPath; Name = 'SetDisableUXWUAccess'; ManagedSource = $false }
     )
 
     $removedCount = 0
+    $preservedCount = 0
     foreach ($policy in $policiesToRemove) {
         try {
-            if (Test-Path $policy.Path) {
-                $value = Get-ItemProperty -Path $policy.Path -Name $policy.Name -ErrorAction SilentlyContinue
-                if ($null -ne $value) {
-                    [void](Remove-WURegistryValueWithJournal -Path $policy.Path -Name $policy.Name -Category 'Policy' -Action 'RemoveBlockingPolicy')
-                    Write-Log "Removed: $($policy.Name)" -Level SUCCESS
-                    $removedCount++
+            $currentValue = Get-WURegistryValue -Path $policy.Path -Name $policy.Name
+            if ($null -ne $currentValue) {
+                if ($policy.ManagedSource -and $preserveManagedSource) {
+                    Write-Log "Preserved managed update-source policy: $($policy.Name)=$currentValue" -Level INFO
+                    $preservedCount++
+                    continue
                 }
+
+                [void](Remove-WURegistryValueWithJournal -Path $policy.Path -Name $policy.Name -Category 'Policy' -Action 'RemoveBlockingPolicy')
+                Write-Log "Removed: $($policy.Name)" -Level SUCCESS
+                $removedCount++
             }
         }
         catch { }
@@ -2362,14 +2491,8 @@ function Repair-UpdatePolicies {
         Write-Log "Removed $removedCount blocking policies" -Level SUCCESS
     }
 
-    # Check for WSUS redirection (common in enterprise/LTSC)
-    $wsusPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
-    if (Test-Path $wsusPath) {
-        $wuServer = (Get-ItemProperty -Path $wsusPath -Name 'WUServer' -ErrorAction SilentlyContinue).WUServer
-        if ($wuServer) {
-            Write-Log "WSUS Server configured: $wuServer" -Level WARNING
-            Write-Log "If this is incorrect, updates will fail. Remove with Group Policy." -Level WARNING
-        }
+    if ($preservedCount -gt 0) {
+        Write-Log "Preserved $preservedCount managed update-source policy value(s)" -Level WARNING
     }
 }
 
@@ -4147,6 +4270,7 @@ function Start-WURepair {
         [string]$JournalPath,
         [string]$RollbackJournal,
         [switch]$ApplyRollback,
+        [switch]$ResetManagedUpdatePolicy,
         [switch]$Unattended
     )
 
@@ -4238,6 +4362,12 @@ function Start-WURepair {
             'Stop update-related services, refresh their configuration, and rebuild update caches.'
             'Re-register update DLLs, reset network and Delivery Optimization components, clean registry state, and refresh Update Orchestrator.'
         )
+        if ($ResetManagedUpdatePolicy) {
+            $plannedSteps += 'Explicitly reset managed WSUS/SUP/WUfB source policy values if they are present.'
+        }
+        else {
+            $plannedSteps += 'Preserve managed WSUS/SUP/WUfB source policy values unless explicitly reset.'
+        }
         if ($RepairDISM -and $StageSSU) { $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.' }
         elseif ($StageSSU) { $plannedSteps += 'SSU staging was requested, but it will be skipped because DISM is not running.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
@@ -4322,7 +4452,7 @@ function Start-WURepair {
         $phases += @{ Name = 'Repair SSL/TLS';             Action = { Repair-TLSConfiguration } }
         $phases += @{ Name = 'Repair Firewall Rules';      Action = { Repair-FirewallRules } }
         $phases += @{ Name = 'Repair Service Dependencies'; Action = { Repair-ServiceDependencies } }
-        $phases += @{ Name = 'Remove Blocking Policies';   Action = { Repair-UpdatePolicies } }
+        $phases += @{ Name = 'Remove Blocking Policies';   Action = { Repair-UpdatePolicies -ResetManagedUpdatePolicy:$ResetManagedUpdatePolicy } }
     }
     if ($RepairServices) {
         $phases += @{ Name = 'Stop WU Services';           Action = { Stop-WUServices } }
@@ -4487,6 +4617,7 @@ function Start-WURepair {
         StageSSU              = [bool]$StageSSU
         RepairAll             = [bool]$RepairAll
         Unattended            = [bool]$Unattended
+        ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
         JournalPath           = $Script:Config.JournalPath
     }
     Write-JsonRepairReport -Path $JsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
@@ -4552,6 +4683,7 @@ function Show-Help {
         '-JournalPath <path>   Override the mutation journal JSON path.',
         '-RollbackJournal <path>  Preview reversible changes from a mutation journal.',
         '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
+        '-ResetManagedUpdatePolicy  Remove WSUS/SUP/WUfB source policy values intentionally.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
         '-Help                 Show this help screen.'
     )
@@ -4577,6 +4709,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -ResetManagedUpdatePolicy',
         '.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json',
         '.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json -ApplyRollback',
         '.\WURepair.ps1 -SkipDISM'
@@ -4633,6 +4766,7 @@ if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] =
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
 if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
+if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePolicy'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
