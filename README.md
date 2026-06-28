@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.13.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.14.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -52,7 +52,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **DISM Integration**: Repairs component store corruption
 - **Component Store Analysis**: Parses `DISM /AnalyzeComponentStore` and uses `/ResetBase` only when cleanup is recommended and reclaimable data is at least 1024 MB
 - **Servicing Stack Preflight**: Optional `-StageSSU` path downloads and installs an applicable Servicing Stack Update before DISM
-- **Catalog SSU Repair**: Optional `-RepairServicingStack` searches Microsoft Update Catalog, downloads the newest matching SSU `.msu`, and retries the next match if `wusa.exe` returns `0x800f0922`
+- **Catalog SSU Repair**: Optional `-RepairServicingStack` searches Microsoft Update Catalog, downloads the newest matching SSU `.msu`, validates SHA256 plus Microsoft Authenticode signature, and retries the next match if `wusa.exe` returns `0x800f0922`
 - **SFC Integration**: Scans and repairs system file integrity
 
 ### 📊 Diagnostics & Verification
@@ -81,7 +81,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.13.0
+    Windows Update Repair Tool v2.14.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -322,7 +322,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.13.0 Flow                      │
+│                      WURepair v2.14.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -338,7 +338,7 @@ To preview or apply journal rollback:
 │ 12. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
 │ 13. Reset Windows Update Agent                                  │
 │ 14. Optional SSU staging before DISM (-StageSSU)                │
-│ 15. Optional Catalog SSU repair (-RepairServicingStack)         │
+│ 15. Optional verified Catalog SSU repair (-RepairServicingStack)│
 │ 16. Run DISM + analyzed component cleanup                      │
 │ 17. Run SFC (system file check)                                │
 │ 18. Start Update Services                                       │
@@ -368,6 +368,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.14.0
+- Catalog SSU downloads now require SHA256 hashing plus valid Microsoft Authenticode signature before `wusa.exe` runs
+- JSON reports include Catalog package validation records with hash, signature status, and signer metadata
 
 ### v2.13.0
 - Added per-run mutation journal JSON for hosts, registry, policy, and cache changes

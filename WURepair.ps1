@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.14.0 validates Microsoft Update Catalog downloads before install.
     v2.13.0 adds mutation journaling and rollback support.
     v2.12.0 adds unattended mode with automation exit codes.
     v2.11.0 adds optional JSON repair reports for RMM ingestion.
@@ -26,7 +27,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.13.0
+    Version: 2.14.0
 #>
 
 #Requires -RunAsAdministrator
@@ -42,7 +43,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.13.0'
+    Version                            = '2.14.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -151,6 +152,7 @@ $Script:WUTraceLogPath = $null
 $Script:CurrentPhaseTelemetry = $null
 $Script:LastRunExitCode = 0
 $Script:MutationJournal = $null
+$Script:CatalogPackageValidationResults = @()
 $Script:ExitCodes = @{
     Success             = 0
     Warnings            = 10
@@ -3404,6 +3406,79 @@ function Get-MicrosoftUpdateCatalogDownloadUrl {
     return [System.Net.WebUtility]::HtmlDecode($match.Groups['Url'].Value)
 }
 
+function Test-WUCatalogPackageValidation {
+    param(
+        [string]$Path,
+        [string]$SourceUrl = ''
+    )
+
+    $result = [ordered]@{
+        Path                  = $Path
+        SourceUrl             = $SourceUrl
+        FileName              = if ([string]::IsNullOrWhiteSpace($Path)) { '' } else { [System.IO.Path]::GetFileName($Path) }
+        SizeBytes             = 0
+        SHA256                = ''
+        AuthenticodeStatus    = 'Unknown'
+        AuthenticodeMessage   = ''
+        SignerSubject         = ''
+        SignerIssuer          = ''
+        IsMicrosoftSigned     = $false
+        IsValid               = $false
+        ValidatedAt           = (Get-Date).ToString('o')
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        $result.AuthenticodeMessage = 'File not found.'
+        $validation = [PSCustomObject]$result
+        $Script:CatalogPackageValidationResults += $validation
+        return $validation
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $result.SizeBytes = [int64]$item.Length
+    }
+    catch { }
+
+    try {
+        $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
+        $result.SHA256 = [string]$hash.Hash
+    }
+    catch {
+        $result.AuthenticodeMessage = "SHA256 hash failed: $($_.Exception.Message)"
+    }
+
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop
+        $result.AuthenticodeStatus = [string]$signature.Status
+        $result.AuthenticodeMessage = [string]$signature.StatusMessage
+        if ($signature.SignerCertificate) {
+            $result.SignerSubject = [string]$signature.SignerCertificate.Subject
+            $result.SignerIssuer = [string]$signature.SignerCertificate.Issuer
+        }
+
+        $signerText = "$($result.SignerSubject) $($result.SignerIssuer)"
+        $result.IsMicrosoftSigned = ($signerText -match 'Microsoft')
+        $result.IsValid = ($signature.Status -eq 'Valid' -and $result.IsMicrosoftSigned -and -not [string]::IsNullOrWhiteSpace($result.SHA256))
+    }
+    catch {
+        $result.AuthenticodeStatus = 'Error'
+        $result.AuthenticodeMessage = $_.Exception.Message
+    }
+
+    $validation = [PSCustomObject]$result
+    $Script:CatalogPackageValidationResults += $validation
+
+    if ($validation.IsValid) {
+        Write-Log "Catalog package validation passed: $($validation.FileName) SHA256=$($validation.SHA256)" -Level SUCCESS
+    }
+    else {
+        Write-Log "Catalog package validation failed: $($validation.FileName) Status=$($validation.AuthenticodeStatus) Signer=$($validation.SignerSubject) SHA256=$($validation.SHA256)" -Level WARNING
+    }
+
+    return $validation
+}
+
 function Invoke-MicrosoftUpdateCatalogDownload {
     param(
         [string]$Url
@@ -3416,6 +3491,11 @@ function Invoke-MicrosoftUpdateCatalogDownload {
 
     Write-Log "Downloading Catalog SSU package: $fileName"
     Invoke-WebRequest -Uri $Url -OutFile $destination -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+    $validation = Test-WUCatalogPackageValidation -Path $destination -SourceUrl $Url
+    if (-not $validation.IsValid) {
+        throw "Downloaded Catalog package failed validation. Status=$($validation.AuthenticodeStatus); Signer=$($validation.SignerSubject); SHA256=$($validation.SHA256)"
+    }
+
     return $destination
 }
 
@@ -4025,6 +4105,7 @@ function Write-JsonRepairReport {
             LogPath                = $Script:Config.LogPath
             MutationJournalPath    = $Script:Config.JournalPath
             MutationJournal        = Get-WUMutationJournalSummary
+            CatalogPackageValidation = @($Script:CatalogPackageValidationResults)
             PostRepairConnectivity = if ($PostConnectivity) { 'AllEndpointsReachable' } else { 'SomeEndpointsUnreachable' }
             PhaseResults           = $PhaseResults
             Delta                  = Get-DiagnosticReportDelta -Before $PreReport -After $PostReport
