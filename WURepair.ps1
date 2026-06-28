@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.10.0 adds Microsoft Update Catalog SSU repair fallback.
     v2.9.0 adds component store analysis before DISM cleanup.
     v2.8.0 adds optional Servicing Stack Update staging before DISM.
     v2.7.0 adds targeted Delivery Optimization repair.
@@ -22,7 +23,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.9.0
+    Version: 2.10.0
 #>
 
 #Requires -RunAsAdministrator
@@ -38,9 +39,10 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.9.0'
+    Version                            = '2.10.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
+    CatalogMaxCandidates               = 5
     Ui                                 = @{
         AccentColor   = 'Cyan'
         TitleColor    = 'White'
@@ -363,6 +365,7 @@ function Get-EstimatedRepairDuration {
         [bool]$RepairStore,
         [bool]$RepairWaaS,
         [bool]$RepairDelivery,
+        [bool]$RepairServicingStack,
         [bool]$StageSSU
     )
 
@@ -388,6 +391,10 @@ function Get-EstimatedRepairDuration {
     if ($StageSSU -and $RepairDISM) {
         $minMinutes += 5
         $maxMinutes += 20
+    }
+    if ($RepairServicingStack) {
+        $minMinutes += 5
+        $maxMinutes += 25
     }
     if ($RepairDISM) {
         $minMinutes += 15
@@ -2655,6 +2662,336 @@ function Get-WUUpdateKbText {
     return 'No KB listed'
 }
 
+function Get-WUUnsignedExitCode {
+    param(
+        [int]$ExitCode
+    )
+
+    return [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$ExitCode), 0)
+}
+
+function Format-WUExitCode {
+    param(
+        [int]$ExitCode
+    )
+
+    $unsigned = Get-WUUnsignedExitCode -ExitCode $ExitCode
+    return ('0x{0:X8}' -f $unsigned)
+}
+
+function Test-WUExitCode {
+    param(
+        [int]$ExitCode,
+        [uint32]$Expected
+    )
+
+    return ((Get-WUUnsignedExitCode -ExitCode $ExitCode) -eq $Expected)
+}
+
+function Convert-WUCatalogHtmlText {
+    param(
+        [string]$Html
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Html)) {
+        return ''
+    }
+
+    $withoutTags = [regex]::Replace($Html, '<[^>]+>', ' ')
+    $decoded = [System.Net.WebUtility]::HtmlDecode($withoutTags)
+    return ([regex]::Replace($decoded, '\s+', ' ')).Trim()
+}
+
+function Get-WUCatalogProfile {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $currentVersion = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+
+    $caption = if ($os -and $os.Caption) { [string]$os.Caption } else { 'Windows' }
+    $product = if ($caption -match 'Windows 11') {
+        'Windows 11'
+    }
+    elseif ($caption -match 'Windows 10') {
+        'Windows 10'
+    }
+    else {
+        $caption
+    }
+
+    $displayVersion = ''
+    if ($currentVersion -and -not [string]::IsNullOrWhiteSpace([string]$currentVersion.DisplayVersion)) {
+        $displayVersion = [string]$currentVersion.DisplayVersion
+    }
+    elseif ($currentVersion -and -not [string]::IsNullOrWhiteSpace([string]$currentVersion.ReleaseId)) {
+        $displayVersion = [string]$currentVersion.ReleaseId
+    }
+
+    $processorArchitecture = [string]$env:PROCESSOR_ARCHITECTURE
+    $architecture = if ($processorArchitecture -match 'ARM64') {
+        'arm64'
+    }
+    elseif ($processorArchitecture -match '86' -and $processorArchitecture -notmatch 'AMD64') {
+        'x86'
+    }
+    else {
+        'x64'
+    }
+
+    $titleArchitecture = switch ($architecture) {
+        'arm64' { 'arm64-based' }
+        'x86' { 'x86-based' }
+        default { 'x64-based' }
+    }
+
+    return [PSCustomObject]@{
+        Caption           = $caption
+        Product           = $product
+        DisplayVersion    = $displayVersion
+        BuildNumber       = if ($os) { [string]$os.BuildNumber } else { '' }
+        Architecture      = $architecture
+        TitleArchitecture = $titleArchitecture
+    }
+}
+
+function Get-MicrosoftUpdateCatalogCellText {
+    param(
+        [string]$RowHtml,
+        [string]$UpdateId,
+        [int]$Column
+    )
+
+    $pattern = "(?is)<td[^>]+id=`"$([regex]::Escape($UpdateId))_C$Column`_R\d+`"[^>]*>(?<Text>.*?)</td>"
+    $match = [regex]::Match($RowHtml, $pattern)
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return Convert-WUCatalogHtmlText -Html $match.Groups['Text'].Value
+}
+
+function Search-MicrosoftUpdateCatalog {
+    param(
+        [string]$Query
+    )
+
+    $encodedQuery = [uri]::EscapeDataString($Query)
+    $searchUri = "https://www.catalog.update.microsoft.com/Search.aspx?q=$encodedQuery"
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $response = Invoke-WebRequest -Uri $searchUri -WebSession $session -UseBasicParsing -TimeoutSec 45 -ErrorAction Stop
+
+    $results = @()
+    $rowMatches = [regex]::Matches($response.Content, '(?is)<tr id="(?<Id>[0-9a-f-]{36})_R\d+"[^>]*>(?<Row>.*?)</tr>')
+    foreach ($rowMatch in $rowMatches) {
+        $updateId = $rowMatch.Groups['Id'].Value
+        $rowHtml = $rowMatch.Groups['Row'].Value
+        $titlePattern = "(?is)<a[^>]+id=['`"]$([regex]::Escape($updateId))_link['`"][^>]*>(?<Title>.*?)</a>"
+        $titleMatch = [regex]::Match($rowHtml, $titlePattern)
+        if (-not $titleMatch.Success) {
+            continue
+        }
+
+        $dateText = Get-MicrosoftUpdateCatalogCellText -RowHtml $rowHtml -UpdateId $updateId -Column 4
+        $published = [datetime]::MinValue
+        [void][datetime]::TryParse($dateText, [ref]$published)
+
+        $results += [PSCustomObject]@{
+            UpdateId       = $updateId
+            Title          = Convert-WUCatalogHtmlText -Html $titleMatch.Groups['Title'].Value
+            Products       = Get-MicrosoftUpdateCatalogCellText -RowHtml $rowHtml -UpdateId $updateId -Column 2
+            Classification = Get-MicrosoftUpdateCatalogCellText -RowHtml $rowHtml -UpdateId $updateId -Column 3
+            Published      = $published
+            Size           = Get-MicrosoftUpdateCatalogCellText -RowHtml $rowHtml -UpdateId $updateId -Column 6
+            Query          = $Query
+        }
+    }
+
+    return [PSCustomObject]@{
+        SearchUri  = $searchUri
+        WebSession = $session
+        Results    = $results
+    }
+}
+
+function Get-MicrosoftUpdateCatalogServicingStackSet {
+    $catalogProfile = Get-WUCatalogProfile
+    $queries = @()
+    if (-not [string]::IsNullOrWhiteSpace($catalogProfile.DisplayVersion)) {
+        $queries += "Servicing Stack Update $($catalogProfile.Product) Version $($catalogProfile.DisplayVersion) $($catalogProfile.Architecture)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($catalogProfile.BuildNumber)) {
+        $queries += "Servicing Stack Update $($catalogProfile.Product) $($catalogProfile.BuildNumber) $($catalogProfile.Architecture)"
+    }
+    $queries += "Servicing Stack Update $($catalogProfile.Product) $($catalogProfile.Architecture)"
+
+    foreach ($query in ($queries | Select-Object -Unique)) {
+        Write-Log "Searching Microsoft Update Catalog: $query"
+        try {
+            $searchSet = Search-MicrosoftUpdateCatalog -Query $query
+        }
+        catch {
+            Write-Log "Catalog search failed for '$query': $($_.Exception.Message)" -Level WARNING
+            continue
+        }
+
+        $candidateMatches = @($searchSet.Results | Where-Object {
+            $_.Title -match '(?i)Servicing Stack Update' -and
+            $_.Title -match [regex]::Escape($catalogProfile.Product) -and
+            $_.Title -match [regex]::Escape($catalogProfile.TitleArchitecture)
+        })
+
+        if (-not [string]::IsNullOrWhiteSpace($catalogProfile.DisplayVersion)) {
+            $versionMatches = @($candidateMatches | Where-Object { $_.Title -match [regex]::Escape("Version $($catalogProfile.DisplayVersion)") })
+            if ($versionMatches.Count -gt 0) {
+                $candidateMatches = $versionMatches
+            }
+        }
+
+        $candidateMatches = @($candidateMatches | Sort-Object Published, Title -Descending | Select-Object -First $Script:Config.CatalogMaxCandidates)
+        if ($candidateMatches.Count -gt 0) {
+            Write-Log "Catalog returned $($candidateMatches.Count) matching Servicing Stack candidate(s)" -Level SUCCESS
+            return [PSCustomObject]@{
+                SearchUri  = $searchSet.SearchUri
+                WebSession = $searchSet.WebSession
+                Profile    = $catalogProfile
+                Candidates = $candidateMatches
+            }
+        }
+    }
+
+    Write-Log "No matching Servicing Stack Update was found in Microsoft Update Catalog" -Level WARNING
+    return $null
+}
+
+function Get-MicrosoftUpdateCatalogDownloadUrl {
+    param(
+        [string]$UpdateId,
+        [string]$SearchUri,
+        [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession
+    )
+
+    $json = ConvertTo-Json -InputObject @([PSCustomObject]@{ updateID = $UpdateId }) -Compress
+    $body = "updateIDs=$([uri]::EscapeDataString($json))"
+    $headers = @{
+        Referer        = $SearchUri
+        'Content-Type' = 'application/x-www-form-urlencoded'
+    }
+    $response = Invoke-WebRequest -Uri 'https://www.catalog.update.microsoft.com/DownloadDialog.aspx' `
+        -Method Post `
+        -Body $body `
+        -Headers $headers `
+        -WebSession $WebSession `
+        -UseBasicParsing `
+        -TimeoutSec 45 `
+        -ErrorAction Stop
+
+    $match = [regex]::Match($response.Content, "downloadInformation\[\d+\]\.files\[\d+\]\.url\s*=\s*'(?<Url>https://[^']+\.msu)'", 'IgnoreCase')
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return [System.Net.WebUtility]::HtmlDecode($match.Groups['Url'].Value)
+}
+
+function Invoke-MicrosoftUpdateCatalogDownload {
+    param(
+        [string]$Url
+    )
+
+    $downloadRoot = Join-Path $Script:Config.TempPath 'ServicingStack'
+    New-Item -Path $downloadRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $fileName = [System.IO.Path]::GetFileName(([uri]$Url).LocalPath)
+    $destination = Join-Path $downloadRoot $fileName
+
+    Write-Log "Downloading Catalog SSU package: $fileName"
+    Invoke-WebRequest -Uri $Url -OutFile $destination -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+    return $destination
+}
+
+function Invoke-ServicingStackMsuInstall {
+    param(
+        [string]$MsuPath
+    )
+
+    Write-Log "Installing SSU package with wusa.exe: $MsuPath"
+    $process = Start-Process -FilePath 'wusa.exe' `
+        -ArgumentList @("`"$MsuPath`"", '/quiet', '/norestart') `
+        -Wait `
+        -PassThru `
+        -WindowStyle Hidden
+
+    $exitCode = [int]$process.ExitCode
+    $exitHex = Format-WUExitCode -ExitCode $exitCode
+    if ($exitCode -eq 0) {
+        Write-Log "wusa.exe install completed successfully ($exitHex)" -Level SUCCESS
+        return 'Succeeded'
+    }
+    if ($exitCode -eq 3010) {
+        Write-Log "wusa.exe install succeeded and requested reboot ($exitHex)" -Level WARNING
+        return 'RebootRequired'
+    }
+    if ((Get-WUUnsignedExitCode -ExitCode $exitCode) -eq 0x00240006) {
+        Write-Log "SSU package is already installed ($exitHex)" -Level SUCCESS
+        return 'AlreadyInstalled'
+    }
+    if (Test-WUExitCode -ExitCode $exitCode -Expected 0x800f0922) {
+        Write-Log "wusa.exe returned 0x800f0922 for this SSU package" -Level WARNING
+        return 'ServicingStackFailure'
+    }
+
+    Write-Log "wusa.exe install failed with exit code $exitHex" -Level WARNING
+    return 'Failed'
+}
+
+function Invoke-ServicingStackCatalogRepair {
+    param(
+        [string]$Reason = 'Servicing Stack Catalog repair requested'
+    )
+
+    Write-Log "SERVICING STACK - Microsoft Update Catalog Repair" -Level SECTION
+    Write-Log $Reason
+
+    $catalogSet = Get-MicrosoftUpdateCatalogServicingStackSet
+    if ($null -eq $catalogSet) {
+        return
+    }
+
+    foreach ($candidate in $catalogSet.Candidates) {
+        Write-Log "Catalog candidate: $($candidate.Title) | Published: $($candidate.Published.ToString('yyyy-MM-dd')) | Size: $($candidate.Size)" -Level INFO
+
+        try {
+            $downloadUrl = Get-MicrosoftUpdateCatalogDownloadUrl -UpdateId $candidate.UpdateId -SearchUri $catalogSet.SearchUri -WebSession $catalogSet.WebSession
+        }
+        catch {
+            Write-Log "Could not resolve Catalog download URL: $($_.Exception.Message)" -Level WARNING
+            continue
+        }
+
+        if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
+            Write-Log "Catalog did not return an MSU download URL for candidate $($candidate.UpdateId)" -Level WARNING
+            continue
+        }
+
+        try {
+            $packagePath = Invoke-MicrosoftUpdateCatalogDownload -Url $downloadUrl
+        }
+        catch {
+            Write-Log "Could not download Catalog SSU package: $($_.Exception.Message)" -Level WARNING
+            continue
+        }
+
+        $installState = Invoke-ServicingStackMsuInstall -MsuPath $packagePath
+        if ($installState -in @('Succeeded', 'RebootRequired', 'AlreadyInstalled')) {
+            Write-Log "Catalog Servicing Stack repair completed with state: $installState" -Level SUCCESS
+            return
+        }
+        if ($installState -eq 'ServicingStackFailure') {
+            Write-Log "Trying next Catalog SSU candidate after 0x800f0922" -Level WARNING
+            continue
+        }
+    }
+
+    Write-Log "Catalog Servicing Stack repair did not complete successfully" -Level WARNING
+}
+
 function Invoke-ServicingStackPreflight {
     Write-Log "SERVICING STACK - Staging Latest Applicable SSU" -Level SECTION
 
@@ -2771,6 +3108,21 @@ function Invoke-ServicingStackPreflight {
 
         if ($installResult.RebootRequired) {
             Write-Log "SSU installation requested a restart; DISM will continue, but reboot after repair is important" -Level WARNING
+        }
+
+        try {
+            $updateResult = $installResult.GetUpdateResult(0)
+            $hresult = [int]$updateResult.HResult
+            if ($hresult -ne 0) {
+                $hresultHex = Format-WUExitCode -ExitCode $hresult
+                Write-Log "SSU install HRESULT: $hresultHex" -Level WARNING
+                if (Test-WUExitCode -ExitCode $hresult -Expected 0x800f0922) {
+                    Invoke-ServicingStackCatalogRepair -Reason 'Windows Update Agent returned 0x800f0922 while staging SSU; falling back to Microsoft Update Catalog.'
+                }
+            }
+        }
+        catch {
+            Write-Log "Could not read SSU install HRESULT: $($_.Exception.Message)" -Level WARNING
         }
     }
     catch {
@@ -3091,6 +3443,7 @@ function Start-WURepair {
         [switch]$RepairNetwork,
         [switch]$RepairWaaS,
         [switch]$RepairDelivery,
+        [switch]$RepairServicingStack,
         [switch]$StageSSU,
         [switch]$RepairAll
     )
@@ -3107,7 +3460,7 @@ function Start-WURepair {
     Initialize-EventSource
 
     # Determine selective mode: if no specific -Repair* switch given, run all
-    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery)
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
     if ($RepairAll -or (-not $selectiveMode)) {
         # Full repair mode
         $RepairServices = $true
@@ -3162,6 +3515,7 @@ function Start-WURepair {
         if ($RepairNetwork) { $plannedSteps += 'Reset Winsock and key network update paths.' }
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
         if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
+        if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
     }
     else {
         $plannedSteps += @(
@@ -3172,11 +3526,12 @@ function Start-WURepair {
         )
         if ($RepairDISM -and $StageSSU) { $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.' }
         elseif ($StageSSU) { $plannedSteps += 'SSU staging was requested, but it will be skipped because DISM is not running.' }
+        if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
     }
 
-    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery -StageSSU $StageSSU
+    $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery -RepairServicingStack $RepairServicingStack -StageSSU $StageSSU
     $backupMode = if ($RepairStore) {
         if (-not $SkipBackup -and $Script:Config.CreateBackup) { 'Enabled before cache reset' } else { 'Skipped for cache reset' }
     }
@@ -3276,6 +3631,9 @@ function Start-WURepair {
     }
     if ($RepairDISM -and $StageSSU) {
         $phases += @{ Name = 'Stage Servicing Stack';       Action = { Invoke-ServicingStackPreflight } }
+    }
+    if ($RepairServicingStack) {
+        $phases += @{ Name = 'Repair Servicing Stack';      Action = { Invoke-ServicingStackCatalogRepair } }
     }
     if ($RepairDISM) {
         $phases += @{ Name = 'DISM Repairs';               Action = { Invoke-DISM } }
@@ -3398,6 +3756,7 @@ function Show-Help {
         '-RepairNetwork   Reset network stack and update connectivity paths.',
         '-RepairWaaS      Reset Update Orchestrator services and USO tasks.',
         '-RepairDelivery  Reset Delivery Optimization cache and download mode.',
+        '-RepairServicingStack  Download/install matching Catalog SSU package.',
         '-RepairAll       Force the full repair flow.'
     )
 
@@ -3435,6 +3794,7 @@ if ($args -contains '-RepairSFC') { $params['RepairSFC'] = $true }
 if ($args -contains '-RepairNetwork') { $params['RepairNetwork'] = $true }
 if ($args -contains '-RepairWaaS') { $params['RepairWaaS'] = $true }
 if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
+if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
