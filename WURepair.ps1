@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.9.0 adds component store analysis before DISM cleanup.
     v2.8.0 adds optional Servicing Stack Update staging before DISM.
     v2.7.0 adds targeted Delivery Optimization repair.
     v2.6.0 adds targeted WaaS / Update Orchestrator repair.
@@ -21,7 +22,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.8.0
+    Version: 2.9.0
 #>
 
 #Requires -RunAsAdministrator
@@ -37,9 +38,10 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version        = '2.8.0'
-    EventSource    = 'WURepair'
-    Ui             = @{
+    Version                            = '2.9.0'
+    EventSource                        = 'WURepair'
+    ComponentStoreResetBaseThresholdMB = 1024
+    Ui                                 = @{
         AccentColor   = 'Cyan'
         TitleColor    = 'White'
         MutedColor    = 'DarkGray'
@@ -2776,6 +2778,148 @@ function Invoke-ServicingStackPreflight {
     }
 }
 
+function Convert-WUSizeToMegabyte {
+    param(
+        [string]$SizeText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SizeText)) {
+        return 0
+    }
+
+    $normalized = $SizeText.Trim()
+    if ($normalized -notmatch '(?<Value>[\d\.,]+)\s*(?<Unit>bytes?|KB|MB|GB|TB)') {
+        return 0
+    }
+
+    $numberText = $Matches.Value
+    if ($numberText.Contains(',') -and $numberText.Contains('.')) {
+        $numberText = $numberText.Replace(',', '')
+    }
+    elseif ($numberText.Contains(',')) {
+        $numberText = $numberText.Replace(',', '.')
+    }
+
+    $number = 0.0
+    if (-not [double]::TryParse($numberText, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+        return 0
+    }
+
+    switch ($Matches.Unit.ToUpperInvariant()) {
+        'BYTE' { return [math]::Round($number / 1MB, 2) }
+        'BYTES' { return [math]::Round($number / 1MB, 2) }
+        'KB' { return [math]::Round($number / 1024, 2) }
+        'MB' { return [math]::Round($number, 2) }
+        'GB' { return [math]::Round($number * 1024, 2) }
+        'TB' { return [math]::Round($number * 1024 * 1024, 2) }
+        default { return 0 }
+    }
+}
+
+function Get-ComponentStoreAnalysis {
+    Write-Log "Analyzing component store with DISM /AnalyzeComponentStore..."
+
+    $analysisOutput = DISM /Online /Cleanup-Image /AnalyzeComponentStore 2>&1
+    $analysisExitCode = $LASTEXITCODE
+    if ($analysisExitCode -ne 0) {
+        Write-Log "AnalyzeComponentStore failed with exit code $analysisExitCode" -Level WARNING
+        return $null
+    }
+
+    $analysis = [ordered]@{
+        ExplorerReportedSizeMB      = 0
+        ActualSizeMB                = 0
+        SharedWithWindowsMB         = 0
+        BackupsDisabledFeaturesMB   = 0
+        CacheTemporaryDataMB        = 0
+        CleanupDeltaMB              = 0
+        ExplorerActualDeltaMB       = 0
+        ReclaimablePackages         = 0
+        CleanupRecommended          = $false
+        RawOutput                   = ($analysisOutput -join "`n")
+    }
+
+    foreach ($line in $analysisOutput) {
+        $text = [string]$line
+        if ($text -match 'Windows Explorer Reported Size of Component Store\s*:\s*(?<Size>.+)$') {
+            $analysis.ExplorerReportedSizeMB = Convert-WUSizeToMegabyte -SizeText $Matches.Size
+        }
+        elseif ($text -match 'Actual Size of Component Store\s*:\s*(?<Size>.+)$') {
+            $analysis.ActualSizeMB = Convert-WUSizeToMegabyte -SizeText $Matches.Size
+        }
+        elseif ($text -match 'Shared with Windows\s*:\s*(?<Size>.+)$') {
+            $analysis.SharedWithWindowsMB = Convert-WUSizeToMegabyte -SizeText $Matches.Size
+        }
+        elseif ($text -match 'Backups and Disabled Features\s*:\s*(?<Size>.+)$') {
+            $analysis.BackupsDisabledFeaturesMB = Convert-WUSizeToMegabyte -SizeText $Matches.Size
+        }
+        elseif ($text -match 'Cache and Temporary Data\s*:\s*(?<Size>.+)$') {
+            $analysis.CacheTemporaryDataMB = Convert-WUSizeToMegabyte -SizeText $Matches.Size
+        }
+        elseif ($text -match 'Number of Reclaimable Packages\s*:\s*(?<Count>\d+)') {
+            $analysis.ReclaimablePackages = [int]$Matches.Count
+        }
+        elseif ($text -match 'Component Store Cleanup Recommended\s*:\s*(?<Value>Yes|No)') {
+            $analysis.CleanupRecommended = ($Matches.Value -eq 'Yes')
+        }
+    }
+
+    $analysis.CleanupDeltaMB = [math]::Round(($analysis.BackupsDisabledFeaturesMB + $analysis.CacheTemporaryDataMB), 2)
+    if ($analysis.ExplorerReportedSizeMB -gt $analysis.ActualSizeMB) {
+        $analysis.ExplorerActualDeltaMB = [math]::Round(($analysis.ExplorerReportedSizeMB - $analysis.ActualSizeMB), 2)
+    }
+
+    return [PSCustomObject]$analysis
+}
+
+function Invoke-ComponentStoreCleanup {
+    $analysis = Get-ComponentStoreAnalysis
+    $thresholdMB = [double]$Script:Config.ComponentStoreResetBaseThresholdMB
+    $useResetBase = $false
+
+    if ($null -ne $analysis) {
+        Write-Log ("Component store sizes: Explorer={0} MB, Actual={1} MB, Shared={2} MB" -f $analysis.ExplorerReportedSizeMB, $analysis.ActualSizeMB, $analysis.SharedWithWindowsMB) -Level INFO
+        Write-Log ("Component store cleanup delta: {0} MB; Reclaimable packages: {1}; Cleanup recommended: {2}" -f $analysis.CleanupDeltaMB, $analysis.ReclaimablePackages, $analysis.CleanupRecommended) -Level INFO
+        if ($analysis.ExplorerActualDeltaMB -gt 0) {
+            Write-Log ("Explorer vs actual component-store delta: {0} MB" -f $analysis.ExplorerActualDeltaMB) -Level INFO
+        }
+
+        $useResetBase = ($analysis.CleanupRecommended -and $analysis.CleanupDeltaMB -ge $thresholdMB)
+        if ($useResetBase) {
+            Write-Log "Cleanup delta meets /ResetBase threshold ($thresholdMB MB); superseded updates will no longer be uninstallable" -Level WARNING
+        }
+        else {
+            Write-Log "Cleanup delta is below /ResetBase threshold ($thresholdMB MB); using standard StartComponentCleanup" -Level INFO
+        }
+    }
+    else {
+        Write-Log "Component store analysis unavailable; using standard StartComponentCleanup" -Level WARNING
+    }
+
+    if ($useResetBase) {
+        Write-Log "Running StartComponentCleanup /ResetBase..."
+        $resetOutput = DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Component cleanup with /ResetBase complete" -Level SUCCESS
+            return
+        }
+
+        Write-Log "StartComponentCleanup /ResetBase failed: $($resetOutput -join ' ')" -Level WARNING
+        Write-Log "Falling back to standard StartComponentCleanup..."
+    }
+    else {
+        Write-Log "Running standard StartComponentCleanup..."
+    }
+
+    $cleanupOutput = DISM /Online /Cleanup-Image /StartComponentCleanup 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "Component cleanup complete" -Level SUCCESS
+    }
+    else {
+        Write-Log "StartComponentCleanup completed with issues: $($cleanupOutput -join ' ')" -Level WARNING
+    }
+}
+
 function Invoke-DISM {
     Write-Log "DISM - Running System Image Repairs" -Level SECTION
 
@@ -2807,9 +2951,7 @@ function Invoke-DISM {
         Write-Log "Scan completed"
     }
 
-    Write-Log "Cleaning up superseded components..."
-    $result = DISM /Online /Cleanup-Image /StartComponentCleanup 2>&1
-    Write-Log "Component cleanup complete" -Level SUCCESS
+    Invoke-ComponentStoreCleanup
 }
 
 function Invoke-SFC {
