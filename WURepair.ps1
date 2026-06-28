@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.16.0 adds redacted support bundle generation.
     v2.15.0 adds managed update-source guardrails before policy removal.
     v2.14.0 validates Microsoft Update Catalog downloads before install.
     v2.13.0 adds mutation journaling and rollback support.
@@ -28,7 +29,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.15.0
+    Version: 2.16.0
 #>
 
 #Requires -RunAsAdministrator
@@ -44,7 +45,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.15.0'
+    Version                            = '2.16.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -3529,6 +3530,35 @@ function Get-MicrosoftUpdateCatalogDownloadUrl {
     return [System.Net.WebUtility]::HtmlDecode($match.Groups['Url'].Value)
 }
 
+function Get-WUFileSha256 {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+
+    $hashCommand = Get-Command -Name Get-FileHash -ErrorAction SilentlyContinue
+    if ($hashCommand) {
+        $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
+        return [string]$hash.Hash
+    }
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return (($hashBytes | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Test-WUCatalogPackageValidation {
     param(
         [string]$Path,
@@ -3564,8 +3594,7 @@ function Test-WUCatalogPackageValidation {
     catch { }
 
     try {
-        $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
-        $result.SHA256 = [string]$hash.Hash
+        $result.SHA256 = Get-WUFileSha256 -Path $Path
     }
     catch {
         $result.AuthenticodeMessage = "SHA256 hash failed: $($_.Exception.Message)"
@@ -4245,6 +4274,278 @@ function Write-JsonRepairReport {
     }
 }
 
+function Resolve-WUSupportBundlePath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+
+    $resolvedInput = [Environment]::ExpandEnvironmentVariables($Path)
+    if (Test-Path -LiteralPath $resolvedInput -PathType Container) {
+        $resolvedInput = Join-Path $resolvedInput "WURepair_SupportBundle_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
+    }
+    elseif ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($resolvedInput))) {
+        $resolvedInput = "$resolvedInput.zip"
+    }
+
+    $parent = Split-Path -Parent $resolvedInput
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        $resolvedInput = Join-Path (Get-Location).Path $resolvedInput
+        $parent = Split-Path -Parent $resolvedInput
+    }
+
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    return [System.IO.Path]::GetFullPath($resolvedInput)
+}
+
+function ConvertTo-WUSupportBundleText {
+    param(
+        [AllowNull()][string]$Text,
+        [switch]$NoRedact
+    )
+
+    if ($null -eq $Text) {
+        return ''
+    }
+
+    $redacted = [string]$Text
+    if ($NoRedact) {
+        return $redacted
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $redacted = [regex]::Replace($redacted, [regex]::Escape($env:USERPROFILE), '<redacted-user-profile>', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+
+    $redacted = [regex]::Replace($redacted, '(?i)\b([A-Z]):\\Users\\[^\\\r\n]+', '$1:\Users\<redacted-user>')
+
+    if (-not [string]::IsNullOrWhiteSpace($env:USERNAME)) {
+        $userPattern = '(?i)(?<![\w.-])' + [regex]::Escape($env:USERNAME) + '(?![\w.-])'
+        $redacted = [regex]::Replace($redacted, $userPattern, '<redacted-user>')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
+        $computerPattern = '(?i)(?<![\w.-])' + [regex]::Escape($env:COMPUTERNAME) + '(?![\w.-])'
+        $redacted = [regex]::Replace($redacted, $computerPattern, '<redacted-computer>')
+    }
+
+    $redacted = [regex]::Replace($redacted, '(?i)\bS-1-5-21-\d+-\d+-\d+-\d+\b', '<redacted-sid>')
+    return $redacted
+}
+
+function Add-WUSupportBundleTextFile {
+    param(
+        [string]$BundleRoot,
+        [string]$RelativePath,
+        [AllowNull()][string]$Content,
+        [AllowNull()][string]$SourcePath = '',
+        [switch]$NoRedact
+    )
+
+    $destination = Join-Path $BundleRoot $RelativePath
+    $destinationParent = Split-Path -Parent $destination
+    if (-not (Test-Path -LiteralPath $destinationParent)) {
+        New-Item -Path $destinationParent -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $safeContent = ConvertTo-WUSupportBundleText -Text $Content -NoRedact:$NoRedact
+    Set-Content -LiteralPath $destination -Value $safeContent -Encoding UTF8 -Force
+    $item = Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue
+
+    return [PSCustomObject]@{
+        RelativePath = $RelativePath
+        SourcePath   = ConvertTo-WUSupportBundleText -Text $SourcePath -NoRedact:$NoRedact
+        Status       = 'Included'
+        Bytes        = if ($item) { [int64]$item.Length } else { 0 }
+    }
+}
+
+function Add-WUSupportBundleFile {
+    param(
+        [string]$BundleRoot,
+        [string]$RelativePath,
+        [string]$SourcePath,
+        [switch]$NoRedact
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) {
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content "Not found: $SourcePath" -SourcePath $SourcePath -NoRedact:$NoRedact
+    }
+
+    try {
+        $content = Get-Content -LiteralPath $SourcePath -Raw -ErrorAction Stop
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content $content -SourcePath $SourcePath -NoRedact:$NoRedact
+    }
+    catch {
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content "Could not read $SourcePath`: $($_.Exception.Message)" -SourcePath $SourcePath -NoRedact:$NoRedact
+    }
+}
+
+function Add-WUSupportBundleTailFile {
+    param(
+        [string]$BundleRoot,
+        [string]$RelativePath,
+        [string]$SourcePath,
+        [int]$Tail = 400,
+        [switch]$NoRedact
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) {
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content "Not found: $SourcePath" -SourcePath $SourcePath -NoRedact:$NoRedact
+    }
+
+    try {
+        $content = (Get-Content -LiteralPath $SourcePath -Tail $Tail -ErrorAction Stop) -join [Environment]::NewLine
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content $content -SourcePath $SourcePath -NoRedact:$NoRedact
+    }
+    catch {
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content "Could not read tail from $SourcePath`: $($_.Exception.Message)" -SourcePath $SourcePath -NoRedact:$NoRedact
+    }
+}
+
+function Add-WUSupportBundleEventExport {
+    param(
+        [string]$BundleRoot,
+        [string]$RelativePath,
+        [string]$LogName,
+        [string]$ProviderName = '',
+        [int]$MaxEvents = 50,
+        [switch]$NoRedact
+    )
+
+    try {
+        $filter = @{
+            LogName   = $LogName
+            StartTime = (Get-Date).AddDays(-14)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderName)) {
+            $filter.ProviderName = $ProviderName
+        }
+
+        $events = @(Get-WinEvent -FilterHashtable $filter -MaxEvents $MaxEvents -ErrorAction SilentlyContinue)
+        $eventObjects = @($events | ForEach-Object {
+            [PSCustomObject]@{
+                TimeCreated      = if ($_.TimeCreated) { $_.TimeCreated.ToString('o') } else { $null }
+                ProviderName     = $_.ProviderName
+                Id               = $_.Id
+                LevelDisplayName = $_.LevelDisplayName
+                Message          = ($_.Message -replace "`r`n|`n", ' ')
+            }
+        })
+
+        $json = if ($eventObjects.Count -gt 0) {
+            $eventObjects | ConvertTo-Json -Depth 5
+        }
+        else {
+            '[]'
+        }
+
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content $json -SourcePath $LogName -NoRedact:$NoRedact
+    }
+    catch {
+        return Add-WUSupportBundleTextFile -BundleRoot $BundleRoot -RelativePath $RelativePath -Content "Could not export $LogName events: $($_.Exception.Message)" -SourcePath $LogName -NoRedact:$NoRedact
+    }
+}
+
+function New-WUSupportBundle {
+    param(
+        [string]$Path,
+        [string]$JsonReportPath,
+        [string]$ModeLabel,
+        [string]$OverallStatus,
+        [int]$ExitCode,
+        [object[]]$PhaseResults,
+        [switch]$NoRedact
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    try {
+        $bundlePath = Resolve-WUSupportBundlePath -Path $Path
+        if ([string]::IsNullOrWhiteSpace($bundlePath)) {
+            return $null
+        }
+
+        if (-not (Test-Path -LiteralPath $Script:Config.TempPath)) {
+            New-Item -Path $Script:Config.TempPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+
+        $bundleRoot = Join-Path $Script:Config.TempPath "SupportBundle_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$([guid]::NewGuid().ToString('N'))"
+        New-Item -Path $bundleRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $files = New-Object 'System.Collections.Generic.List[object]'
+
+        [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'WURepair.log' -SourcePath $Script:Config.LogPath -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'WURepair-report.json' -SourcePath $JsonReportPath -NoRedact:$NoRedact))
+
+        $legacyLog = Join-Path $env:SystemRoot 'WindowsUpdate.log'
+        $traceLog = Get-WUConvertedTraceLogPath
+        if (Test-Path -LiteralPath $legacyLog) {
+            [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'logs\WindowsUpdate.log' -SourcePath $legacyLog -NoRedact:$NoRedact))
+            if ($traceLog) {
+                [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'logs\WindowsUpdate_ETW.log' -SourcePath $traceLog -NoRedact:$NoRedact))
+            }
+        }
+        elseif ($traceLog) {
+            [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'logs\WindowsUpdate.log' -SourcePath $traceLog -NoRedact:$NoRedact))
+        }
+        else {
+            [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'logs\WindowsUpdate.log' -Content 'WindowsUpdate.log and converted ETW traces were not available.' -NoRedact:$NoRedact))
+        }
+
+        [void]$files.Add((Add-WUSupportBundleTailFile -BundleRoot $bundleRoot -RelativePath 'logs\CBS.tail.log' -SourcePath (Join-Path $env:SystemRoot 'Logs\CBS\CBS.log') -Tail 500 -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleTailFile -BundleRoot $bundleRoot -RelativePath 'logs\DISM.tail.log' -SourcePath (Join-Path $env:SystemRoot 'Logs\DISM\dism.log') -Tail 500 -NoRedact:$NoRedact))
+
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\WURepair-Application.json' -LogName 'Application' -ProviderName $Script:Config.EventSource -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\WindowsUpdateClient-Operational.json' -LogName 'Microsoft-Windows-WindowsUpdateClient/Operational' -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\UpdateOrchestrator-Operational.json' -LogName 'Microsoft-Windows-UpdateOrchestrator/Operational' -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\WaaSMedic-Operational.json' -LogName 'Microsoft-Windows-WaaSMedic/Operational' -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\WaaSMedicSvc-Operational.json' -LogName 'Microsoft-Windows-WaaSMedicSvc/Operational' -NoRedact:$NoRedact))
+
+        $manifestFiles = @($files.ToArray() | ForEach-Object {
+            [PSCustomObject]@{
+                RelativePath = $_.RelativePath
+                SourcePath   = $_.SourcePath
+                Status       = $_.Status
+                Bytes        = $_.Bytes
+            }
+        })
+        $manifest = [ordered]@{
+            Tool          = 'WURepair'
+            Version       = $Script:Config.Version
+            CreatedAt     = (Get-Date).ToString('o')
+            ComputerName  = ConvertTo-WUSupportBundleText -Text $env:COMPUTERNAME -NoRedact:$NoRedact
+            UserName      = ConvertTo-WUSupportBundleText -Text $env:USERNAME -NoRedact:$NoRedact
+            Mode          = $ModeLabel
+            OverallStatus = $OverallStatus
+            ExitCode      = $ExitCode
+            Redaction     = if ($NoRedact) { 'Disabled' } else { 'Enabled' }
+            LogPath       = ConvertTo-WUSupportBundleText -Text $Script:Config.LogPath -NoRedact:$NoRedact
+            JsonReport    = ConvertTo-WUSupportBundleText -Text $JsonReportPath -NoRedact:$NoRedact
+            PhaseResults  = $PhaseResults
+            Files         = $manifestFiles
+        }
+        [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'manifest.json' -Content ($manifest | ConvertTo-Json -Depth 8) -NoRedact:$NoRedact))
+
+        if (Test-Path -LiteralPath $bundlePath) {
+            Remove-Item -LiteralPath $bundlePath -Force -ErrorAction Stop
+        }
+        Compress-Archive -Path (Join-Path $bundleRoot '*') -DestinationPath $bundlePath -Force
+        Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "Support bundle written to: $bundlePath" -Level SUCCESS
+        return $bundlePath
+    }
+    catch {
+        Write-Log "Could not create support bundle '$Path': $($_.Exception.Message)" -Level WARNING
+        return $null
+    }
+}
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -4267,10 +4568,12 @@ function Start-WURepair {
         [switch]$StageSSU,
         [switch]$RepairAll,
         [string]$JsonReport,
+        [string]$SupportBundle,
         [string]$JournalPath,
         [string]$RollbackJournal,
         [switch]$ApplyRollback,
         [switch]$ResetManagedUpdatePolicy,
+        [switch]$NoRedact,
         [switch]$Unattended
     )
 
@@ -4316,6 +4619,10 @@ function Start-WURepair {
 
     $startTime = Get-Date
     $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
+    $effectiveJsonReport = $JsonReport
+    if (-not [string]::IsNullOrWhiteSpace($SupportBundle) -and [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
+        $effectiveJsonReport = Join-Path $Script:Config.TempPath "WURepair-report_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
+    }
     Write-Log "WURepair v$($Script:Config.Version) started at $startTime"
     Write-Log "Log file: $($Script:Config.LogPath)"
     Write-Log "Mutation journal: $($Script:Config.JournalPath)"
@@ -4353,7 +4660,8 @@ function Start-WURepair {
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
         if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
-        if (-not [string]::IsNullOrWhiteSpace($JsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $JsonReport." }
+        if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
+        if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
     }
     else {
         $plannedSteps += @(
@@ -4373,7 +4681,8 @@ function Start-WURepair {
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
-        if (-not [string]::IsNullOrWhiteSpace($JsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $JsonReport." }
+        if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
+        if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
     }
 
     $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery -RepairServicingStack $RepairServicingStack -StageSSU $StageSSU
@@ -4394,8 +4703,11 @@ function Start-WURepair {
     Write-UiMetric -Label 'Restore point' -Value $restorePointMode -Tone $(if ($selectiveMode) { 'Info' } else { 'Success' })
     Write-UiMetric -Label 'Connectivity' -Value $connectivityLabel -Tone $(if ($connectivity) { 'Success' } else { 'Warning' })
     Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
-    if (-not [string]::IsNullOrWhiteSpace($JsonReport)) {
-        Write-UiMetric -Label 'JSON report' -Value $JsonReport -Tone 'Info'
+    if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
+        Write-UiMetric -Label 'JSON report' -Value $effectiveJsonReport -Tone 'Info'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) {
+        Write-UiMetric -Label 'Support bundle' -Value $SupportBundle -Tone 'Info'
     }
 
     Write-UiList -Title 'Planned work' -Items $plannedSteps
@@ -4618,14 +4930,17 @@ function Start-WURepair {
         RepairAll             = [bool]$RepairAll
         Unattended            = [bool]$Unattended
         ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
+        SupportBundle         = $SupportBundle
+        NoRedact              = [bool]$NoRedact
         JournalPath           = $Script:Config.JournalPath
     }
-    Write-JsonRepairReport -Path $JsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
+    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
 
     # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
     Write-Log "Duration: $durationMin minutes"
     Write-Log "Log saved to: $($Script:Config.LogPath)"
+    $supportBundlePath = New-WUSupportBundle -Path $SupportBundle -JsonReportPath $effectiveJsonReport -ModeLabel $modeLabel -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode -PhaseResults $phaseResults -NoRedact:$NoRedact
 
     Write-UiHeader -Title 'Repair complete' -Subtitle 'Restart is strongly recommended to finalize service, cache, and policy changes.' -Tone 'Success'
     Write-UiMetric -Label 'Duration' -Value "$durationMin minutes" -Tone 'Info'
@@ -4633,6 +4948,9 @@ function Start-WURepair {
     Write-UiMetric -Label 'Phases executed' -Value ([string]$totalPhases) -Tone 'Info'
     Write-UiMetric -Label 'Connectivity after repair' -Value $(if ($postConnectivity) { 'All tested endpoints are reachable' } else { 'One or more endpoints are still failing' }) -Tone $(if ($postConnectivity) { 'Success' } else { 'Warning' })
     Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
+    if ($supportBundlePath) {
+        Write-UiMetric -Label 'Support bundle' -Value $supportBundlePath -Tone 'Success'
+    }
 
     Write-UiList -Title 'Next steps' -Items @(
         'Restart Windows to complete the repair run.',
@@ -4680,10 +4998,12 @@ function Show-Help {
         '-SkipBackup           Skip extra cache folder backups before reset.',
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
+        '-SupportBundle <path> Create a redacted zip with logs, events, JSON, and CBS/DISM tails.',
         '-JournalPath <path>   Override the mutation journal JSON path.',
         '-RollbackJournal <path>  Preview reversible changes from a mutation journal.',
         '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
         '-ResetManagedUpdatePolicy  Remove WSUS/SUP/WUfB source policy values intentionally.',
+        '-NoRedact             Keep usernames, device names, paths, and SIDs in support bundles.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
         '-Help                 Show this help screen.'
     )
@@ -4708,6 +5028,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip',
         '.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -ResetManagedUpdatePolicy',
         '.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json',
@@ -4767,9 +5088,13 @@ if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
 if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
 if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePolicy'] = $true }
+if ($args -contains '-NoRedact') { $params['NoRedact'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
+
+$supportBundlePath = Get-CommandLineOptionValue -Arguments $args -Name '-SupportBundle'
+if (-not [string]::IsNullOrWhiteSpace($supportBundlePath)) { $params['SupportBundle'] = $supportBundlePath }
 
 $journalPath = Get-CommandLineOptionValue -Arguments $args -Name '-JournalPath'
 if (-not [string]::IsNullOrWhiteSpace($journalPath)) { $params['JournalPath'] = $journalPath }
