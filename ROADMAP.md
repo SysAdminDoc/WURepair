@@ -10,6 +10,7 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 
 ### Reporting
 - Intune proactive remediation detection + remediation script pair generated from the existing phases.
+  Research note: generated artifacts must honor Intune detection/remediation separation, stable exit codes, 64-bit PowerShell 5.1 hosting, concise/redacted output, and local JSON/support artifact writes.
 
 ### Packaging
 - Signed script variant with embedded Authenticode signature and a release workflow that runs `Set-AuthenticodeSignature` with a hardware token.
@@ -76,3 +77,31 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
   Touches: endpoint/policy data definitions, hosts cleanup, policy repair, tests.
   Acceptance: Microsoft update domains and removable policy keys are defined in a versioned data block with source URLs, tests assert coverage for known regional endpoints, and repair code consumes the manifest instead of hard-coded loops.
   Complexity: M
+
+- [ ] P1 — Add DISM source fallback for mounted ISO/WIM/ESD repairs
+  Why: Machines with broken Windows Update sources can need local repair media before `RestoreHealth` succeeds.
+  Evidence: Microsoft Repair a Windows Image docs; `WURepair.ps1:4099` runs `DISM /Online /Cleanup-Image /RestoreHealth` without `/Source` or `/LimitAccess`.
+  Touches: `WURepair.ps1` `Invoke-DISM`, CLI option parsing, JSON report options, README usage, tests.
+  Acceptance: `-DismSource <path>` accepts a mounted Windows image, WIM, or ESD source, optional `-DismLimitAccess` prevents WU source fallback, invalid sources fail before mutation, and tests verify generated DISM arguments plus JSON/report fields.
+  Complexity: M
+
+- [ ] P1 — Add behavior-level Pester fixtures and release drift checks
+  Why: Current tests protect static contracts but do not exercise CLI parsing, full phase planning, version consistency, or future packaging/remediation artifacts.
+  Evidence: `tests/WURepair.Static.Tests.ps1:1`; `Invoke-LocalChecks.ps1`; Pester and PSScriptAnalyzer docs.
+  Touches: `tests/`, `Invoke-LocalChecks.ps1`, README/version assertions, package metadata when added.
+  Acceptance: Local checks include behavior fixtures for CLI argument parsing, planned phase selection, DISM source arguments, version string consistency across tracked release files, and package/remediation artifact parse validation.
+  Complexity: M
+
+- [ ] P2 — Export a structured Windows Update log timeline
+  Why: Ranked HRESULTs are useful, but support escalations often need timestamped component/message context for failures that show no clear UI error.
+  Evidence: `WURepair.ps1:1079` `Get-WUConvertedTraceLogPath`; `WURepair.ps1:1174` `Get-WUErrorSummary`; PSWindowsUpdate and WuMgr issue queues include no-error/wrong-success complaints; Microsoft `Get-WindowsUpdateLog` docs.
+  Touches: Windows Update log parser, JSON report schema, support bundle manifest, tests.
+  Acceptance: `-AnalyzeLogs` or the support bundle emits `WURepair-wulog.json` with timestamp, component, level, code, message, and source file fields; JSON reports include a compact summary; redaction is applied consistently.
+  Complexity: M
+
+- [ ] P3 — Add WinRE and Quick Machine Recovery diagnostics
+  Why: Offline/WinRE repair is already a roadmap direction, and diagnostics should show whether recovery infrastructure is available before a user needs it.
+  Evidence: existing WinRE offline repair roadmap item; Microsoft Windows recovery/Quick Machine Recovery documentation; no `WinRE`, `reagentc`, or QMR probes currently appear in `WURepair.ps1`.
+  Touches: diagnostics, JSON report, support bundle manifest, README troubleshooting, tests.
+  Acceptance: Pre-check reports WinRE enabled/path/state, captures `reagentc /info` in support bundles, reports Quick Machine Recovery policy/status when available, and does not attempt cloud-managed recovery actions.
+  Complexity: S
