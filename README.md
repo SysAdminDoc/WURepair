@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.20.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.21.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -71,6 +71,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
 - **Plain Text Output**: Optional `-PlainText` emits deterministic ASCII status lines for RMM consoles, screen readers, and log capture
 - **Mutation Journal & Rollback**: Writes a per-run JSON journal of hosts, registry, policy, and cache mutations; `-RollbackJournal` previews/apply reversible changes
+- **Module & Release Packaging**: `WURepair.psd1` / `WURepair.psm1` expose phase wrappers, and `tools\Build-WURepairPackage.ps1` builds script and module ZIPs with SHA256 receipts plus optional file catalogs/signing
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
 - **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
 - **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`, `-RepairWaaS`, `-RepairDelivery`
@@ -85,7 +86,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.20.0
+    Windows Update Repair Tool v2.21.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -124,6 +125,11 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 
 1. Download `WURepair.ps1` from the [Releases](../../releases) page
 2. Save to a convenient location (e.g., Desktop)
+
+To build local release artifacts from source:
+```powershell
+.\tools\Build-WURepairPackage.ps1
+```
 
 ## Usage
 
@@ -254,6 +260,12 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 This runs PowerShell parser validation, PSScriptAnalyzer, and the Pester static-contract tests before release packaging.
 
+Local release packaging:
+```powershell
+.\tools\Build-WURepairPackage.ps1
+.\tools\Build-WURepairPackage.ps1 -CertificateThumbprint '<thumbprint>' -RequireSignature
+```
+
 ## What Gets Fixed
 
 ### Hosts File Domains Unblocked
@@ -350,7 +362,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.20.0 Flow                      │
+│                      WURepair v2.21.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -398,6 +410,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.21.0
+- Added `WURepair.psd1` and `WURepair.psm1` module metadata/wrappers for phase-oriented invocation
+- Added `tools\Build-WURepairPackage.ps1` to build script and module ZIPs with local checks, SHA256 receipts, optional file catalogs, and optional Authenticode signing
 
 ### v2.20.0
 - Added `-AnalyzeLogs` to export a structured Windows Update log timeline

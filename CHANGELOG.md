@@ -2,6 +2,11 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.21.0] - 2026-06-29
+
+- Added `WURepair.psd1` and `WURepair.psm1` module metadata/wrappers for phase-oriented invocation.
+- Added `tools\Build-WURepairPackage.ps1` to build script and module ZIPs with local checks, SHA256 receipts, optional file catalogs, and optional Authenticode signing.
+
 ## [v2.20.0] - 2026-06-29
 
 - Added `-AnalyzeLogs` to export a structured Windows Update log timeline.

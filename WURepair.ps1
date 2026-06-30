@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.21.0 adds module metadata and local release packaging.
     v2.20.0 adds structured Windows Update log timeline export.
     v2.19.0 adds behavior-level validation and release drift checks.
     v2.18.0 adds DISM repair source fallback for mounted Windows media.
@@ -33,7 +34,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.20.0
+    Version: 2.21.0
 #>
 
 #Requires -RunAsAdministrator
@@ -49,7 +50,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.20.0'
+    Version                            = '2.21.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
