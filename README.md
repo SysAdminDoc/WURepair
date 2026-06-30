@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.17.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.18.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -50,6 +50,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Catroot2 Reset**: Clears cryptographic catalog cache
 - **DLL Re-registration**: Re-registers 35+ Windows Update DLLs
 - **DISM Integration**: Repairs component store corruption
+- **DISM Source Fallback**: Optional `-DismSource` uses mounted Windows media, `install.wim`, or `install.esd`; `-DismLimitAccess` prevents Windows Update source fallback
 - **Component Store Analysis**: Parses `DISM /AnalyzeComponentStore` and uses `/ResetBase` only when cleanup is recommended and reclaimable data is at least 1024 MB
 - **Servicing Stack Preflight**: Optional `-StageSSU` path downloads and installs an applicable Servicing Stack Update before DISM
 - **Catalog SSU Repair**: Optional `-RepairServicingStack` searches Microsoft Update Catalog, downloads the newest matching SSU `.msu`, validates SHA256 plus Microsoft Authenticode signature, and retries the next match if `wusa.exe` returns `0x800f0922`
@@ -83,7 +84,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.17.0
+    Windows Update Repair Tool v2.18.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -145,6 +146,8 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-SkipSFC` | Skip only System File Checker |
 | `-SkipBackup` | Skip backup of Windows Update folders |
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
+| `-DismSource <path>` | Use mounted Windows media, `install.wim`, or `install.esd` as the DISM `RestoreHealth` repair source |
+| `-DismLimitAccess` | Prevent DISM from using Windows Update as a repair source |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
 | `-SupportBundle <path>` | Create a redacted zip with WURepair log, JSON report, WindowsUpdate.log, relevant events, and CBS/DISM tails |
 | `-JournalPath <path>` | Override the mutation journal JSON path |
@@ -209,6 +212,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Run DISM with Servicing Stack Update preflight
 .\WURepair.ps1 -RepairDISM -StageSSU
+
+# Run DISM with a mounted ISO/WIM/ESD source and no Windows Update fallback
+.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess
 
 # Repair Servicing Stack directly from Microsoft Update Catalog
 .\WURepair.ps1 -RepairServicingStack
@@ -299,6 +305,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 - Ensure at least 10 GB free disk space
 - Try installing updates one at a time
 - Run `DISM /Online /Cleanup-Image /RestoreHealth` manually
+- If Windows Update repair sources are blocked, mount matching Windows installation media and run `.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess`
 
 ### LTSC/IoT Edition - Limited Updates
 Windows 10/11 LTSC and IoT editions only receive security updates. Feature updates are not available. This is by design, not a bug.
@@ -338,7 +345,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.17.0 Flow                      │
+│                      WURepair v2.18.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -355,7 +362,7 @@ To preview or apply journal rollback:
 │ 13. Reset Windows Update Agent                                  │
 │ 14. Optional SSU staging before DISM (-StageSSU)                │
 │ 15. Optional verified Catalog SSU repair (-RepairServicingStack)│
-│ 16. Run DISM + analyzed component cleanup                      │
+│ 16. Run DISM + optional local source + analyzed cleanup         │
 │ 17. Run SFC (system file check)                                │
 │ 18. Start Update Services                                       │
 │ 19. Refresh Group Policy                                        │
@@ -370,7 +377,7 @@ To preview or apply journal rollback:
 ## Privacy & Safety
 
 - ✅ **No data collection** - Everything runs locally
-- ✅ **No external downloads by default** - `-StageSSU` and `-RepairServicingStack` are opt-in update download paths
+- ✅ **No external downloads by default** - `-StageSSU` and `-RepairServicingStack` are opt-in update download paths; `-DismSource` can keep RestoreHealth on local media
 - ✅ **Open source** - Full source code available for review
 - ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
 - ✅ **Restore point** - System restore point created automatically
@@ -386,6 +393,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.18.0
+- Added `-DismSource <path>` for mounted Windows media, `install.wim`, or `install.esd` RestoreHealth repair sources
+- Added `-DismLimitAccess` to prevent Windows Update source fallback during DISM repair
+- JSON reports now include DISM source and `/LimitAccess` option fields
 
 ### v2.17.0
 - Added `-PlainText` deterministic ASCII console output for automation logs and screen readers

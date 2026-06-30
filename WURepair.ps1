@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.18.0 adds DISM repair source fallback for mounted Windows media.
     v2.17.0 adds plain-text automation output.
     v2.16.0 adds redacted support bundle generation.
     v2.15.0 adds managed update-source guardrails before policy removal.
@@ -30,7 +31,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.17.0
+    Version: 2.18.0
 #>
 
 #Requires -RunAsAdministrator
@@ -46,7 +47,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.17.0'
+    Version                            = '2.18.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -4081,7 +4082,101 @@ function Invoke-ComponentStoreCleanup {
     }
 }
 
+function Resolve-DismRepairSource {
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+        throw "DISM source path does not exist: $Path"
+    }
+
+    $item = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        $windowsPath = if ((Split-Path -Path $resolvedPath -Leaf) -ieq 'Windows') {
+            $resolvedPath
+        }
+        else {
+            Join-Path $resolvedPath 'Windows'
+        }
+
+        if (Test-Path -LiteralPath (Join-Path $windowsPath 'WinSxS')) {
+            return [PSCustomObject]@{
+                SourceArgument = $windowsPath
+                SourceType     = 'MountedWindowsImage'
+                ResolvedPath   = $windowsPath
+            }
+        }
+
+        $candidateFiles = @(
+            (Join-Path (Join-Path $resolvedPath 'sources') 'install.wim'),
+            (Join-Path (Join-Path $resolvedPath 'sources') 'install.esd'),
+            (Join-Path $resolvedPath 'install.wim'),
+            (Join-Path $resolvedPath 'install.esd')
+        )
+
+        foreach ($candidate in $candidateFiles) {
+            if (Test-Path -LiteralPath $candidate) {
+                $extension = [System.IO.Path]::GetExtension($candidate).TrimStart('.').ToUpperInvariant()
+                return [PSCustomObject]@{
+                    SourceArgument = ("{0}:{1}:1" -f $extension, $candidate)
+                    SourceType     = $extension
+                    ResolvedPath   = $candidate
+                }
+            }
+        }
+
+        throw "DISM source must be a mounted Windows image folder, a mounted ISO root with sources\install.wim or sources\install.esd, or an install.wim/install.esd file."
+    }
+
+    $fileExtension = [System.IO.Path]::GetExtension($resolvedPath).ToLowerInvariant()
+    if ($fileExtension -ne '.wim' -and $fileExtension -ne '.esd') {
+        throw "DISM source file must be an install.wim or install.esd image: $Path"
+    }
+
+    $sourceType = $fileExtension.TrimStart('.').ToUpperInvariant()
+    return [PSCustomObject]@{
+        SourceArgument = ("{0}:{1}:1" -f $sourceType, $resolvedPath)
+        SourceType     = $sourceType
+        ResolvedPath   = $resolvedPath
+    }
+}
+
+function Get-DismRestoreHealthPlan {
+    param(
+        [string]$DismSource,
+        [switch]$DismLimitAccess
+    )
+
+    $arguments = @('/Online', '/Cleanup-Image', '/RestoreHealth')
+    $sourceSpec = Resolve-DismRepairSource -Path $DismSource
+
+    if ($sourceSpec) {
+        $arguments += "/Source:$($sourceSpec.SourceArgument)"
+    }
+
+    if ($DismLimitAccess) {
+        $arguments += '/LimitAccess'
+    }
+
+    return [PSCustomObject]@{
+        Arguments   = $arguments
+        Source      = $sourceSpec
+        LimitAccess = [bool]$DismLimitAccess
+    }
+}
+
 function Invoke-DISM {
+    param(
+        [string]$DismSource,
+        [switch]$DismLimitAccess
+    )
+
     Write-Log "DISM - Running System Image Repairs" -Level SECTION
 
     Write-Log "Checking component store health..."
@@ -4096,7 +4191,16 @@ function Invoke-DISM {
         Write-Log "Component store corruption detected, repairing..." -Level WARNING
 
         Write-Log "Running RestoreHealth (this may take 15-30 minutes)..."
-        $result = DISM /Online /Cleanup-Image /RestoreHealth 2>&1
+        $restoreHealthPlan = Get-DismRestoreHealthPlan -DismSource $DismSource -DismLimitAccess:$DismLimitAccess
+        if ($restoreHealthPlan.Source) {
+            Write-Log ("Using DISM repair source: {0}" -f $restoreHealthPlan.Source.SourceArgument) -Level INFO
+        }
+        if ($restoreHealthPlan.LimitAccess) {
+            Write-Log "DISM /LimitAccess enabled; Windows Update will not be used as a repair source" -Level WARNING
+        }
+
+        $restoreArguments = @($restoreHealthPlan.Arguments)
+        $result = DISM @restoreArguments 2>&1
 
         if ($LASTEXITCODE -eq 0) {
             Write-Log "Component store repaired successfully" -Level SUCCESS
@@ -4635,8 +4739,10 @@ function Start-WURepair {
         [string]$SupportBundle,
         [string]$JournalPath,
         [string]$RollbackJournal,
+        [string]$DismSource,
         [switch]$ApplyRollback,
         [switch]$ResetManagedUpdatePolicy,
+        [switch]$DismLimitAccess,
         [switch]$NoRedact,
         [switch]$PlainText,
         [switch]$Unattended
@@ -4651,6 +4757,20 @@ function Start-WURepair {
         Write-Log "Please right-click and 'Run as Administrator'"
         $Script:LastRunExitCode = $Script:ExitCodes.NotAdministrator
         return $Script:LastRunExitCode
+    }
+
+    $dismSourceSpec = $null
+    $initialSelectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
+    $willRunDism = (-not ($SkipDISM -or $QuickMode)) -and ($RepairDISM -or $RepairAll -or (-not $initialSelectiveMode))
+    if ($willRunDism -and -not [string]::IsNullOrWhiteSpace($DismSource)) {
+        try {
+            $dismSourceSpec = Resolve-DismRepairSource -Path $DismSource
+        }
+        catch {
+            Write-Log "Invalid -DismSource: $($_.Exception.Message)" -Level ERROR
+            $Script:LastRunExitCode = $Script:ExitCodes.PhaseErrors
+            return $Script:LastRunExitCode
+        }
     }
 
     # Initialize event log source
@@ -4716,6 +4836,12 @@ function Start-WURepair {
             if ($StageSSU) {
                 $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.'
             }
+            if ($dismSourceSpec) {
+                $plannedSteps += "Use DISM repair source $($dismSourceSpec.SourceArgument)."
+            }
+            if ($DismLimitAccess) {
+                $plannedSteps += 'Run DISM with /LimitAccess so Windows Update is not used as a repair source.'
+            }
             $plannedSteps += 'Run DISM to inspect and repair the component store.'
         }
         elseif ($StageSSU) {
@@ -4745,6 +4871,8 @@ function Start-WURepair {
         if ($RepairDISM -and $StageSSU) { $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.' }
         elseif ($StageSSU) { $plannedSteps += 'SSU staging was requested, but it will be skipped because DISM is not running.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
+        if ($RepairDISM -and $dismSourceSpec) { $plannedSteps += "Use DISM repair source $($dismSourceSpec.SourceArgument)." }
+        if ($RepairDISM -and $DismLimitAccess) { $plannedSteps += 'Run DISM with /LimitAccess so Windows Update is not used as a repair source.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
@@ -4769,6 +4897,12 @@ function Start-WURepair {
     Write-UiMetric -Label 'Restore point' -Value $restorePointMode -Tone $(if ($selectiveMode) { 'Info' } else { 'Success' })
     Write-UiMetric -Label 'Connectivity' -Value $connectivityLabel -Tone $(if ($connectivity) { 'Success' } else { 'Warning' })
     Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
+    if ($dismSourceSpec) {
+        Write-UiMetric -Label 'DISM source' -Value $dismSourceSpec.SourceArgument -Tone 'Info'
+    }
+    elseif ($DismLimitAccess -and $RepairDISM) {
+        Write-UiMetric -Label 'DISM source' -Value 'Local component store only (/LimitAccess)' -Tone 'Warning'
+    }
     if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
         Write-UiMetric -Label 'JSON report' -Value $effectiveJsonReport -Tone 'Info'
     }
@@ -4863,7 +4997,7 @@ function Start-WURepair {
         $phases += @{ Name = 'Repair Servicing Stack';      Action = { Invoke-ServicingStackCatalogRepair } }
     }
     if ($RepairDISM) {
-        $phases += @{ Name = 'DISM Repairs';               Action = { Invoke-DISM } }
+        $phases += @{ Name = 'DISM Repairs';               Action = { Invoke-DISM -DismSource $DismSource -DismLimitAccess:$DismLimitAccess } }
     }
     if ($RepairSFC) {
         $phases += @{ Name = 'System File Checker';        Action = { Invoke-SFC } }
@@ -4993,6 +5127,10 @@ function Start-WURepair {
         RepairDelivery        = [bool]$RepairDelivery
         RepairServicingStack  = [bool]$RepairServicingStack
         StageSSU              = [bool]$StageSSU
+        DismSource            = $DismSource
+        DismResolvedSource    = if ($dismSourceSpec) { $dismSourceSpec.SourceArgument } else { $null }
+        DismSourceType        = if ($dismSourceSpec) { $dismSourceSpec.SourceType } else { $null }
+        DismLimitAccess       = [bool]$DismLimitAccess
         RepairAll             = [bool]$RepairAll
         Unattended            = [bool]$Unattended
         PlainText             = [bool]$PlainText
@@ -5064,6 +5202,8 @@ function Show-Help {
         '-SkipSFC              Skip only System File Checker.',
         '-SkipBackup           Skip extra cache folder backups before reset.',
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
+        '-DismSource <path>    Use mounted Windows media, install.wim, or install.esd for RestoreHealth.',
+        '-DismLimitAccess      Prevent DISM from using Windows Update as a repair source.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
         '-SupportBundle <path> Create a redacted zip with logs, events, JSON, and CBS/DISM tails.',
         '-JournalPath <path>   Override the mutation journal JSON path.',
@@ -5095,6 +5235,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairServices',
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
         '.\WURepair.ps1 -RepairDISM -StageSSU',
+        '.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip',
         '.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json',
@@ -5159,6 +5300,7 @@ if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
 if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePolicy'] = $true }
 if ($args -contains '-NoRedact') { $params['NoRedact'] = $true }
 if ($args -contains '-PlainText') { $params['PlainText'] = $true; $Script:Config.PlainText = $true }
+if ($args -contains '-DismLimitAccess') { $params['DismLimitAccess'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
@@ -5171,6 +5313,9 @@ if (-not [string]::IsNullOrWhiteSpace($journalPath)) { $params['JournalPath'] = 
 
 $rollbackJournalPath = Get-CommandLineOptionValue -Arguments $args -Name '-RollbackJournal'
 if (-not [string]::IsNullOrWhiteSpace($rollbackJournalPath)) { $params['RollbackJournal'] = $rollbackJournalPath }
+
+$dismSourcePath = Get-CommandLineOptionValue -Arguments $args -Name '-DismSource'
+if (-not [string]::IsNullOrWhiteSpace($dismSourcePath)) { $params['DismSource'] = $dismSourcePath }
 
 if ($args -contains '-Help' -or $args -contains '-?') {
     Show-Help
