@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.22.0 adds a versioned endpoint and policy knowledge manifest.
     v2.21.0 adds module metadata and local release packaging.
     v2.20.0 adds structured Windows Update log timeline export.
     v2.19.0 adds behavior-level validation and release drift checks.
@@ -34,7 +35,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.21.0
+    Version: 2.22.0
 #>
 
 #Requires -RunAsAdministrator
@@ -50,7 +51,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.21.0'
+    Version                            = '2.22.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -102,37 +103,164 @@ $Script:WUFolders = @(
     "$env:SystemRoot\System32\catroot2"
 )
 
-# Microsoft domains that should NOT be blocked
-$Script:MicrosoftDomains = @(
-    'update.microsoft.com',
-    'windowsupdate.microsoft.com',
-    'windowsupdate.com',
-    'download.windowsupdate.com',
-    'download.microsoft.com',
-    'wustat.windows.com',
-    'ntservicepack.microsoft.com',
-    'go.microsoft.com',
-    'dl.delivery.mp.microsoft.com',
-    'download.delivery.mp.microsoft.com',
-    'emdl.ws.microsoft.com',
-    'statsfe2.update.microsoft.com',
-    'statsfe2.ws.microsoft.com',
-    'sls.update.microsoft.com',
-    'fe2.update.microsoft.com',
-    'fe3.delivery.mp.microsoft.com',
-    'fe2.ws.microsoft.com',
-    'ctldl.windowsupdate.com',
-    'redir.metaservices.microsoft.com',
-    'validation.sls.microsoft.com',
-    'activation.sls.microsoft.com',
-    'validation-v2.sls.microsoft.com',
-    'displaycatalog.mp.microsoft.com',
-    'licensing.mp.microsoft.com',
-    'purchase.mp.microsoft.com',
-    'displaycatalog.md.mp.microsoft.com',
-    'settings-win.data.microsoft.com',
-    'settings.data.microsoft.com'
-)
+function New-WURepairKnowledgeManifest {
+    $deliveryOptimizationEndpointsUrl = 'https://learn.microsoft.com/en-us/windows/deployment/do/delivery-optimization-endpoints'
+    $windowsEndpointUrl = 'https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints'
+    $updatePolicyCspUrl = 'https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-update'
+
+    [ordered]@{
+        SchemaVersion          = 1
+        KnowledgeVersion       = '2026.06.29'
+        Sources                = @(
+            $deliveryOptimizationEndpointsUrl,
+            $windowsEndpointUrl,
+            $updatePolicyCspUrl
+        )
+        MicrosoftUpdateDomains = @(
+            [ordered]@{ Pattern = 'definitionupdates.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'update.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = '*.update.microsoft.com'; MatchMode = 'WildcardSuffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'windowsupdate.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'windowsupdate.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'download.windowsupdate.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'download.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'wustat.windows.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'ntservicepack.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'go.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'dl.delivery.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = '*.dl.delivery.mp.microsoft.com'; MatchMode = 'WildcardSuffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = 'tlu.dl.delivery.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = 'download.delivery.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = '*.delivery.mp.microsoft.com'; MatchMode = 'WildcardSuffix'; Category = 'DeliveryOptimization'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = '*.prod.do.dsp.mp.microsoft.com'; MatchMode = 'WildcardSuffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = 'emdl.ws.microsoft.com'; MatchMode = 'Suffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = 'statsfe2.update.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'statsfe2.ws.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'sls.update.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'fe2.update.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'fe3.delivery.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'DeliveryOptimization'; SourceUrl = $deliveryOptimizationEndpointsUrl },
+            [ordered]@{ Pattern = 'fe2.ws.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'ctldl.windowsupdate.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'redir.metaservices.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'validation.sls.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'activation.sls.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'validation-v2.sls.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'adl.windows.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'tsfe.trafficshaping.dsp.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = '*.api.cdp.microsoft.com'; MatchMode = 'WildcardSuffix'; Category = 'WindowsUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'displaycatalog.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'MicrosoftStoreUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'licensing.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'MicrosoftStoreUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'purchase.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'MicrosoftStoreUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'displaycatalog.md.mp.microsoft.com'; MatchMode = 'Suffix'; Category = 'MicrosoftStoreUpdate'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'settings-win.data.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdateSettings'; SourceUrl = $windowsEndpointUrl },
+            [ordered]@{ Pattern = 'settings.data.microsoft.com'; MatchMode = 'Suffix'; Category = 'WindowsUpdateSettings'; SourceUrl = $windowsEndpointUrl }
+        )
+        RemovablePolicyValues  = @(
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableWindowsUpdateAccess'; ManagedSource = $false; Category = 'BlockingAccess'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'WUServer'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'WUStatusServer'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'TargetGroup'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'TargetGroupEnabled'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'DisableDualScan'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetPolicyDrivenUpdateSourceForQualityUpdates'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetPolicyDrivenUpdateSourceForFeatureUpdates'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetPolicyDrivenUpdateSourceForDriverUpdates'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetPolicyDrivenUpdateSourceForOtherUpdates'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'UseWUServer'; ManagedSource = $true; Category = 'ManagedSource'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; ManagedSource = $false; Category = 'BlockingAccess'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate'; ManagedSource = $false; Category = 'BlockingAccess'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate'; ManagedSource = $false; Category = 'BlockingAccess'; SourceUrl = $updatePolicyCspUrl },
+            [ordered]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess'; ManagedSource = $false; Category = 'BlockingAccess'; SourceUrl = $updatePolicyCspUrl }
+        )
+    }
+}
+
+$Script:WURepairKnowledgeManifest = New-WURepairKnowledgeManifest
+
+function Get-WURepairKnowledgeManifest {
+    if ($null -eq $Script:WURepairKnowledgeManifest) {
+        $Script:WURepairKnowledgeManifest = New-WURepairKnowledgeManifest
+    }
+
+    return $Script:WURepairKnowledgeManifest
+}
+
+function Get-WUMicrosoftUpdateDomainRules {
+    $manifest = Get-WURepairKnowledgeManifest
+    if ($manifest -and $manifest.MicrosoftUpdateDomains) {
+        return @($manifest.MicrosoftUpdateDomains)
+    }
+
+    return @($Script:MicrosoftDomains | ForEach-Object {
+        [ordered]@{ Pattern = [string]$_; MatchMode = 'Suffix'; Category = 'Legacy'; SourceUrl = '' }
+    })
+}
+
+function Get-WURemovablePolicyValues {
+    $manifest = Get-WURepairKnowledgeManifest
+    if ($manifest -and $manifest.RemovablePolicyValues) {
+        return @($manifest.RemovablePolicyValues)
+    }
+
+    return @()
+}
+
+function Test-WUMicrosoftUpdateDomainRuleMatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][object]$Rule
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HostName) -or $null -eq $Rule) {
+        return $false
+    }
+
+    $normalizedHost = $HostName.Trim().TrimEnd('.').ToLowerInvariant()
+    $pattern = ([string]$Rule.Pattern).Trim().TrimEnd('.').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($pattern)) {
+        return $false
+    }
+
+    if ([string]$Rule.MatchMode -eq 'WildcardSuffix') {
+        $suffix = $pattern.TrimStart('*').TrimStart('.')
+        return ($normalizedHost -eq $suffix -or $normalizedHost.EndsWith(".$suffix"))
+    }
+
+    return ($normalizedHost -eq $pattern -or $normalizedHost.EndsWith(".$pattern"))
+}
+
+function Get-WUBlockedMicrosoftDomainsFromHostsLine {
+    param(
+        [AllowNull()][string]$Line,
+        [object[]]$DomainRules = $(Get-WUMicrosoftUpdateDomainRules)
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line) -or $Line -notmatch '^\s*(0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?<Hosts>.+)$') {
+        return @()
+    }
+
+    $hostsPart = $Matches.Hosts -replace '\s+#.*$', ''
+    $blockedHosts = New-Object System.Collections.Generic.List[string]
+    foreach ($hostToken in ($hostsPart -split '\s+')) {
+        if ([string]::IsNullOrWhiteSpace($hostToken) -or $hostToken.StartsWith('#')) {
+            continue
+        }
+
+        foreach ($rule in $DomainRules) {
+            if (Test-WUMicrosoftUpdateDomainRuleMatch -HostName $hostToken -Rule $rule) {
+                [void]$blockedHosts.Add($hostToken.Trim().TrimEnd('.').ToLowerInvariant())
+                break
+            }
+        }
+    }
+
+    return @($blockedHosts | Sort-Object -Unique)
+}
+
+# Microsoft domains that should NOT be blocked. Kept as a compatibility alias
+# for older helper logic and tests; the manifest above is authoritative.
+$Script:MicrosoftDomains = @(Get-WUMicrosoftUpdateDomainRules | ForEach-Object { $_.Pattern })
 
 $Script:WUErrorReferenceUrl = 'https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-error-reference'
 $Script:WUErrorSearchUrl = 'https://learn.microsoft.com/search/?terms='
@@ -2170,11 +2298,7 @@ function Get-DiagnosticReport {
     if (Test-Path $hostsPath) {
         $hostsContent = Get-Content -Path $hostsPath -ErrorAction SilentlyContinue
         foreach ($line in $hostsContent) {
-            foreach ($domain in $Script:MicrosoftDomains) {
-                if ($line -match [regex]::Escape($domain) -and $line -match '^\s*(0\.0\.0\.0|127\.0\.0\.1)\s+') {
-                    $blockedDomains += $domain
-                }
-            }
+            $blockedDomains += Get-WUBlockedMicrosoftDomainsFromHostsLine -Line $line
         }
     }
     $blockedDomains = $blockedDomains | Sort-Object -Unique
@@ -2387,18 +2511,12 @@ function Repair-HostsFile {
     foreach ($line in $hostsContent) {
         $shouldRemove = $false
 
-        # Check if line contains any Microsoft domain we need
-        foreach ($domain in $Script:MicrosoftDomains) {
-            if ($line -match [regex]::Escape($domain)) {
-                # Check if it's a blocking entry (points to 0.0.0.0 or 127.0.0.1)
-                if ($line -match '^\s*(0\.0\.0\.0|127\.0\.0\.1)\s+') {
-                    $shouldRemove = $true
-                    $removedCount++
-                    $removedLines += $line
-                    Write-Log "Removing block: $line" -Level INFO
-                    break
-                }
-            }
+        $blockedHosts = @(Get-WUBlockedMicrosoftDomainsFromHostsLine -Line $line)
+        if ($blockedHosts.Count -gt 0) {
+            $shouldRemove = $true
+            $removedCount++
+            $removedLines += $line
+            Write-Log "Removing Microsoft update block: $line" -Level INFO
         }
 
         if (-not $shouldRemove) {
@@ -2644,25 +2762,8 @@ function Repair-UpdatePolicies {
         }
     }
 
-    # Registry paths that can block Windows Update
-    $policiesToRemove = @(
-        @{ Path = $wuPolicyPath; Name = 'DisableWindowsUpdateAccess'; ManagedSource = $false },
-        @{ Path = $wuPolicyPath; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'WUServer'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'WUStatusServer'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'TargetGroup'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'TargetGroupEnabled'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'DisableDualScan'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForQualityUpdates'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForFeatureUpdates'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForDriverUpdates'; ManagedSource = $true },
-        @{ Path = $wuPolicyPath; Name = 'SetPolicyDrivenUpdateSourceForOtherUpdates'; ManagedSource = $true },
-        @{ Path = $auPolicyPath; Name = 'UseWUServer'; ManagedSource = $true },
-        @{ Path = $auPolicyPath; Name = 'NoAutoUpdate'; ManagedSource = $false },
-        @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate'; ManagedSource = $false },
-        @{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'; Name = 'NoWindowsUpdate'; ManagedSource = $false },
-        @{ Path = $wuPolicyPath; Name = 'SetDisableUXWUAccess'; ManagedSource = $false }
-    )
+    # Registry paths that can block Windows Update.
+    $policiesToRemove = Get-WURemovablePolicyValues
 
     $removedCount = 0
     $preservedCount = 0
@@ -2800,11 +2901,7 @@ function Get-WUDiagnostics {
         $hostsContent = Get-Content -Path $hostsPath -ErrorAction SilentlyContinue
         $blockedDomains = @()
         foreach ($line in $hostsContent) {
-            foreach ($domain in $Script:MicrosoftDomains) {
-                if ($line -match [regex]::Escape($domain) -and $line -match '^\s*(0\.0\.0\.0|127\.0\.0\.1)') {
-                    $blockedDomains += $domain
-                }
-            }
+            $blockedDomains += Get-WUBlockedMicrosoftDomainsFromHostsLine -Line $line
         }
         if ($blockedDomains.Count -gt 0) {
             Write-Log "Found $($blockedDomains.Count) blocked Microsoft domains in hosts file!" -Level ERROR
