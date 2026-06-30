@@ -2,6 +2,12 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.20.0] - 2026-06-29
+
+- Added `-AnalyzeLogs` to export a structured Windows Update log timeline.
+- Support bundles now include `logs/WURepair-wulog.json`.
+- JSON reports include a compact Windows Update log timeline summary when log analysis runs.
+
 ## [v2.19.0] - 2026-06-29
 
 - Added behavior-level validation for CLI option parsing, repair phase selection, DISM source arguments, release version drift, and optional package/remediation artifact parsing.

@@ -44,6 +44,10 @@ Describe 'WURepair static contract' {
             'Invoke-WUMutationRollback',
             'ConvertTo-WUErrorCode',
             'Get-WUErrorArticleLink',
+            'Get-WULogSources',
+            'ConvertTo-WULogTimelineEntry',
+            'Get-WULogTimeline',
+            'Get-WULogTimelineSummary',
             'Get-WURegistryValue',
             'Test-WUConfiguredPolicyValue',
             'Get-WUManagedUpdateSourceGuardrail',
@@ -112,6 +116,10 @@ Describe 'WURepair static contract' {
             'Invoke-WUMutationRollback',
             'ConvertTo-WUErrorCode',
             'Get-WUErrorArticleLink',
+            'Get-WULogSources',
+            'ConvertTo-WULogTimelineEntry',
+            'Get-WULogTimeline',
+            'Get-WULogTimelineSummary',
             'Get-WURegistryValue',
             'Test-WUConfiguredPolicyValue',
             'Get-WUManagedUpdateSourceGuardrail',
@@ -356,7 +364,18 @@ Describe 'WURepair static contract' {
             Mock Get-WinEvent { @() }
 
             $bundlePath = Join-Path $TestDrive 'support.zip'
-            $result = New-WUSupportBundle -Path $bundlePath -JsonReportPath $jsonPath -ModeLabel 'Test' -OverallStatus 'Success' -ExitCode 0 -PhaseResults @()
+            $timeline = @(
+                [PSCustomObject]@{
+                    Timestamp  = '2026-06-29T12:00:00.0000000'
+                    Component  = 'Agent'
+                    Level      = 'Error'
+                    Code       = '0x80240016'
+                    Message    = 'Alice saw an update failure on DESKTOP-TEST'
+                    SourceFile = '%WINDIR%\WindowsUpdate.log'
+                    Line       = 42
+                }
+            )
+            $result = New-WUSupportBundle -Path $bundlePath -JsonReportPath $jsonPath -ModeLabel 'Test' -OverallStatus 'Success' -ExitCode 0 -PhaseResults @() -WULogTimeline $timeline
 
             Test-Path -LiteralPath $result | Should -BeTrue
             Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -366,6 +385,7 @@ Describe 'WURepair static contract' {
                 $entryNames | Should -Contain 'manifest.json'
                 $entryNames | Should -Contain 'WURepair.log'
                 $entryNames | Should -Contain 'WURepair-report.json'
+                $entryNames | Should -Contain 'logs/WURepair-wulog.json'
                 $entryNames | Should -Contain 'logs/CBS.tail.log'
                 $entryNames | Should -Contain 'events/WURepair-Application.json'
 
@@ -610,6 +630,48 @@ Describe 'WURepair static contract' {
         $restoreCall | Should -Contain '/RestoreHealth'
         $restoreCall | Should -Contain "/Source:WIM:${wimPath}:1"
         $restoreCall | Should -Contain '/LimitAccess'
+    }
+
+    It 'parses Windows Update log timeline entries with redaction' {
+        $originalUserName = $env:USERNAME
+        $originalComputerName = $env:COMPUTERNAME
+        try {
+            $env:USERNAME = 'Alice'
+            $env:COMPUTERNAME = 'DESKTOP-TEST'
+            $line = '2026/06/29 12:34:56.1234567 1234 5678 Agent WARNING: Download failed with 0x80240016 for Alice on DESKTOP-TEST'
+
+            $entry = ConvertTo-WULogTimelineEntry -Line $line -Source '%WINDIR%\WindowsUpdate.log' -LineNumber 17
+
+            $entry.Timestamp | Should -Not -BeNullOrEmpty
+            $entry.Component | Should -Be 'Agent'
+            $entry.Level | Should -Be 'Error'
+            $entry.Code | Should -Be '0x80240016'
+            $entry.Message | Should -Not -Match 'Alice|DESKTOP-TEST'
+            $entry.SourceFile | Should -Be '%WINDIR%\WindowsUpdate.log'
+            $entry.Line | Should -Be 17
+        }
+        finally {
+            $env:USERNAME = $originalUserName
+            $env:COMPUTERNAME = $originalComputerName
+        }
+    }
+
+    It 'summarizes Windows Update log timelines by level and code' {
+        $timeline = @(
+            [PSCustomObject]@{ Level = 'Error'; Code = '0x80240016'; SourceFile = 'WindowsUpdate.log' },
+            [PSCustomObject]@{ Level = 'Error'; Code = '0x80240016'; SourceFile = 'WindowsUpdate.log' },
+            [PSCustomObject]@{ Level = 'Warning'; Code = $null; SourceFile = 'WindowsUpdate_ETW.log' }
+        )
+
+        $summary = Get-WULogTimelineSummary -Timeline $timeline
+
+        $summary.EntryCount | Should -Be 3
+        $summary.ErrorCount | Should -Be 2
+        $summary.WarningCount | Should -Be 1
+        $summary.Sources | Should -Contain 'WindowsUpdate.log'
+        $summary.Sources | Should -Contain 'WindowsUpdate_ETW.log'
+        $summary.TopCodes[0].Code | Should -Be '0x80240016'
+        $summary.TopCodes[0].Count | Should -Be 2
     }
 
     It 'parses CLI option values for spaced and inline assignments' {

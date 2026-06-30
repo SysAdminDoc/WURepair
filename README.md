@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.19.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.20.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -59,6 +59,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 ### 📊 Diagnostics & Verification
 - **Diagnostic Pre-Check Report**: Formatted status table showing service states, folder sizes, DISM health, pending reboot status, last successful update date, and last 5 Windows Update errors from event log
 - **Ranked HRESULT Summary**: Parses `%WINDIR%\WindowsUpdate.log` and converted Windows Update ETW traces into the top 10 recurring error codes with Microsoft reference links
+- **Structured Update Log Timeline**: Optional `-AnalyzeLogs` exports timestamped Windows Update log entries with component, level, HRESULT, source file, and redacted message fields
 - **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
 - **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
 - **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, policy-driven update-source settings, and managed-source guardrail status
@@ -84,7 +85,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.19.0
+    Windows Update Repair Tool v2.20.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -148,6 +149,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
 | `-DismSource <path>` | Use mounted Windows media, `install.wim`, or `install.esd` as the DISM `RestoreHealth` repair source |
 | `-DismLimitAccess` | Prevent DISM from using Windows Update as a repair source |
+| `-AnalyzeLogs` | Export a structured Windows Update log timeline and compact JSON summary |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
 | `-SupportBundle <path>` | Create a redacted zip with WURepair log, JSON report, WindowsUpdate.log, relevant events, and CBS/DISM tails |
 | `-JournalPath <path>` | Override the mutation journal JSON path |
@@ -215,6 +217,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Run DISM with a mounted ISO/WIM/ESD source and no Windows Update fallback
 .\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess
+
+# Export a structured Windows Update log timeline into JSON reporting
+.\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json
 
 # Repair Servicing Stack directly from Microsoft Update Catalog
 .\WURepair.ps1 -RepairServicingStack
@@ -316,7 +321,7 @@ Windows 10/11 LTSC and IoT editions only receive security updates. Feature updat
 |------|----------|---------|
 | `WURepair_[timestamp].log` | Desktop | Detailed operation log |
 | `WURepair_Journal_[timestamp].json` | Desktop | Machine-readable mutation journal and rollback data |
-| `WURepair-support.zip` | User-supplied `-SupportBundle` path | Redacted support bundle with logs, JSON report, event exports, WindowsUpdate.log, and CBS/DISM tails |
+| `WURepair-support.zip` | User-supplied `-SupportBundle` path | Redacted support bundle with logs, JSON report, event exports, WindowsUpdate.log, structured WU timeline, and CBS/DISM tails |
 | `SoftwareDistribution.bak.[timestamp]` | C:\Windows | Backup of update cache |
 | `catroot2.bak.[timestamp]` | C:\Windows\System32 | Backup of crypto cache |
 | `hosts.backup.[timestamp]` | C:\Windows\System32\drivers\etc | Backup of hosts file |
@@ -345,7 +350,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.19.0 Flow                      │
+│                      WURepair v2.20.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -382,7 +387,7 @@ To preview or apply journal rollback:
 - ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
 - ✅ **Restore point** - System restore point created automatically
 - ✅ **Detailed logging** - Full audit trail saved to Desktop
-- ✅ **Redacted support bundles** - `-SupportBundle` redacts usernames, device names, profile paths, and SIDs unless `-NoRedact` is supplied
+- ✅ **Redacted support bundles** - `-SupportBundle` redacts usernames, device names, profile paths, SIDs, and structured Windows Update log timeline messages unless `-NoRedact` is supplied
 
 ## Contributing
 
@@ -393,6 +398,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.20.0
+- Added `-AnalyzeLogs` to export a structured Windows Update log timeline
+- Support bundles now include `logs/WURepair-wulog.json`
+- JSON reports include a compact Windows Update log timeline summary when log analysis runs
 
 ### v2.19.0
 - Added behavior-level validation for CLI option parsing, phase selection, DISM source arguments, release version drift, and optional package/remediation artifact parsing
