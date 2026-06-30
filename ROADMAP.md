@@ -67,6 +67,7 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 - [ ] P2 - Add signed release and module packaging metadata
   Why: Existing roadmap names signing and PSGallery separately; implementation needs the manifests and local packaging checks that make those deliverable.
   Evidence: existing Packaging roadmap; PowerShell Gallery publishing docs; `about_Signing`; current tracked files lack `.psd1` or `.psm1` metadata.
+  Research note: include `New-FileCatalog`/`Test-FileCatalog` or SHA256 receipt generation for release ZIP/module contents, and cover non-`.ps1` assets so AllSigned environments do not fail on unsigned support files.
   Touches: module wrapper, manifest, local packaging script, README release instructions when release work begins.
   Acceptance: Local packaging produces a signed script zip and a module artifact with version metadata, license tags, release notes, and analyzer/test checks before packaging.
   Complexity: L
