@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.20.0 adds structured Windows Update log timeline export.
     v2.19.0 adds behavior-level validation and release drift checks.
     v2.18.0 adds DISM repair source fallback for mounted Windows media.
     v2.17.0 adds plain-text automation output.
@@ -32,7 +33,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.19.0
+    Version: 2.20.0
 #>
 
 #Requires -RunAsAdministrator
@@ -48,7 +49,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.19.0'
+    Version                            = '2.20.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -1123,6 +1124,21 @@ function Get-WUConvertedTraceLogPath {
     return $null
 }
 
+function Get-WULogSources {
+    $sources = @()
+    $legacyLog = Join-Path $env:SystemRoot 'WindowsUpdate.log'
+    if (Test-Path -LiteralPath $legacyLog) {
+        $sources += [PSCustomObject]@{ Path = $legacyLog; Name = '%WINDIR%\WindowsUpdate.log' }
+    }
+
+    $traceLog = Get-WUConvertedTraceLogPath
+    if ($traceLog) {
+        $sources += [PSCustomObject]@{ Path = $traceLog; Name = 'Converted Windows Update ETW trace' }
+    }
+
+    return $sources
+}
+
 function Get-WUErrorCodesFromLogFile {
     param(
         [string]$Path,
@@ -1173,22 +1189,138 @@ function Get-WUErrorCodesFromLogFile {
     return $results.ToArray()
 }
 
+function ConvertTo-WULogTimelineEntry {
+    param(
+        [string]$Line,
+        [string]$Source,
+        [int]$LineNumber,
+        [switch]$NoRedact
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return $null
+    }
+
+    $text = $Line.Trim()
+    $timestamp = $null
+    $component = $null
+    $message = $text
+
+    if ($text -match '^(?<Timestamp>\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}:\d{2}(?:[.:]\d+)?)\s+(?<Remainder>.+)$') {
+        $timestampText = $matches.Timestamp
+        $timestampCandidate = $timestampText
+        if ($timestampCandidate -match '^\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}:\d{2}:\d+$') {
+            $timestampCandidate = [regex]::Replace($timestampCandidate, ':(\d+)$', '.$1')
+        }
+
+        $parsedTimestamp = [datetime]::MinValue
+        if ([datetime]::TryParse($timestampCandidate, [ref]$parsedTimestamp)) {
+            $timestamp = $parsedTimestamp.ToString('o')
+        }
+        else {
+            $timestamp = $timestampText
+        }
+
+        $message = $matches.Remainder.Trim()
+    }
+
+    if ($message -match '^(?:\S+\s+){0,2}(?<Component>[A-Za-z][A-Za-z0-9_.-]{1,48})\s+(?<Message>.+)$') {
+        $component = $matches.Component
+        $message = $matches.Message.Trim()
+    }
+
+    $code = $null
+    foreach ($match in [regex]::Matches($text, '(?i)\b0x[0-9a-f]{8}\b|(?<![\w.])-?214[0-9]{7}(?![\w.])')) {
+        $code = ConvertTo-WUErrorCode -Token $match.Value
+        if ($code) {
+            break
+        }
+    }
+
+    $level = 'Info'
+    if ($text -match '(?i)\b(error|fatal|failed|failure)\b' -or $code) {
+        $level = 'Error'
+    }
+    elseif ($text -match '(?i)\b(warn|warning)\b') {
+        $level = 'Warning'
+    }
+
+    if ($message.Length -gt 500) {
+        $message = $message.Substring(0, 497) + '...'
+    }
+
+    $safeMessage = ConvertTo-WUSupportBundleText -Text $message -NoRedact:$NoRedact
+
+    return [PSCustomObject]@{
+        Timestamp  = $timestamp
+        Component  = $component
+        Level      = $level
+        Code       = $code
+        Message    = $safeMessage
+        SourceFile = $Source
+        Line       = $LineNumber
+    }
+}
+
+function Get-WULogTimeline {
+    param(
+        [int]$MaxEntries = 200,
+        [int]$Tail = 2000,
+        [switch]$NoRedact
+    )
+
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($source in (Get-WULogSources)) {
+        $lineNumber = 0
+        try {
+            Get-Content -LiteralPath $source.Path -Tail $Tail -ErrorAction Stop | ForEach-Object {
+                $lineNumber++
+                $entry = ConvertTo-WULogTimelineEntry -Line ([string]$_) -Source $source.Name -LineNumber $lineNumber -NoRedact:$NoRedact
+                if ($entry -and ($entry.Timestamp -or $entry.Code -or $entry.Level -ne 'Info')) {
+                    [void]$entries.Add($entry)
+                }
+            }
+        }
+        catch {
+            Write-Log "Could not parse Windows Update log timeline from $($source.Name): $($_.Exception.Message)" -Level WARNING
+        }
+    }
+
+    if ($entries.Count -eq 0) {
+        return @()
+    }
+
+    return @($entries.ToArray() | Select-Object -Last $MaxEntries)
+}
+
+function Get-WULogTimelineSummary {
+    param(
+        [object[]]$Timeline
+    )
+
+    $items = @($Timeline | Where-Object { $null -ne $_ })
+    $codes = @($items | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Code) } | Group-Object -Property Code | Sort-Object -Property Count -Descending | Select-Object -First 5 | ForEach-Object {
+        [PSCustomObject]@{
+            Code      = $_.Name
+            Count     = $_.Count
+            Reference = Get-WUErrorArticleLink -ErrorCode $_.Name
+        }
+    })
+
+    return [PSCustomObject]@{
+        EntryCount   = $items.Count
+        ErrorCount   = @($items | Where-Object { $_.Level -eq 'Error' }).Count
+        WarningCount = @($items | Where-Object { $_.Level -eq 'Warning' }).Count
+        Sources      = @($items | Select-Object -ExpandProperty SourceFile -Unique)
+        TopCodes     = $codes
+    }
+}
+
 function Get-WUErrorSummary {
     param([int]$MaxEntries = 10)
 
-    $sources = @()
-    $legacyLog = Join-Path $env:SystemRoot 'WindowsUpdate.log'
-    if (Test-Path -LiteralPath $legacyLog) {
-        $sources += [PSCustomObject]@{ Path = $legacyLog; Name = '%WINDIR%\WindowsUpdate.log' }
-    }
-
-    $traceLog = Get-WUConvertedTraceLogPath
-    if ($traceLog) {
-        $sources += [PSCustomObject]@{ Path = $traceLog; Name = 'Converted Windows Update ETW trace' }
-    }
-
     $events = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($source in $sources) {
+    foreach ($source in (Get-WULogSources)) {
         foreach ($wuEvent in (Get-WUErrorCodesFromLogFile -Path $source.Path -Source $source.Name)) {
             [void]$events.Add($wuEvent)
         }
@@ -4396,6 +4528,7 @@ function Write-JsonRepairReport {
         [bool]$PostConnectivity,
         [array]$PhaseResults,
         [hashtable]$Options,
+        [object]$WULogTimelineSummary,
         [string]$OverallStatus,
         [int]$ExitCode
     )
@@ -4427,6 +4560,7 @@ function Write-JsonRepairReport {
             MutationJournalPath    = $Script:Config.JournalPath
             MutationJournal        = Get-WUMutationJournalSummary
             CatalogPackageValidation = @($Script:CatalogPackageValidationResults)
+            WindowsUpdateLogTimeline = $WULogTimelineSummary
             PostRepairConnectivity = if ($PostConnectivity) { 'AllEndpointsReachable' } else { 'SomeEndpointsUnreachable' }
             PhaseResults           = $PhaseResults
             Delta                  = Get-DiagnosticReportDelta -Before $PreReport -After $PostReport
@@ -4628,6 +4762,7 @@ function New-WUSupportBundle {
         [string]$OverallStatus,
         [int]$ExitCode,
         [object[]]$PhaseResults,
+        [object[]]$WULogTimeline,
         [switch]$NoRedact
     )
 
@@ -4666,6 +4801,14 @@ function New-WUSupportBundle {
         else {
             [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'logs\WindowsUpdate.log' -Content 'WindowsUpdate.log and converted ETW traces were not available.' -NoRedact:$NoRedact))
         }
+
+        $timelineJson = if (@($WULogTimeline).Count -gt 0) {
+            @($WULogTimeline) | ConvertTo-Json -Depth 6
+        }
+        else {
+            '[]'
+        }
+        [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'logs\WURepair-wulog.json' -Content $timelineJson -NoRedact:$NoRedact))
 
         [void]$files.Add((Add-WUSupportBundleTailFile -BundleRoot $bundleRoot -RelativePath 'logs\CBS.tail.log' -SourcePath (Join-Path $env:SystemRoot 'Logs\CBS\CBS.log') -Tail 500 -NoRedact:$NoRedact))
         [void]$files.Add((Add-WUSupportBundleTailFile -BundleRoot $bundleRoot -RelativePath 'logs\DISM.tail.log' -SourcePath (Join-Path $env:SystemRoot 'Logs\DISM\dism.log') -Tail 500 -NoRedact:$NoRedact))
@@ -4783,6 +4926,7 @@ function Start-WURepair {
         [switch]$RepairServicingStack,
         [switch]$StageSSU,
         [switch]$RepairAll,
+        [switch]$AnalyzeLogs,
         [string]$JsonReport,
         [string]$SupportBundle,
         [string]$JournalPath,
@@ -4891,6 +5035,7 @@ function Start-WURepair {
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
         if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
+        if ($AnalyzeLogs) { $plannedSteps += 'Export a structured Windows Update log timeline.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
         if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
     }
@@ -4914,6 +5059,7 @@ function Start-WURepair {
         if ($RepairDISM -and $DismLimitAccess) { $plannedSteps += 'Run DISM with /LimitAccess so Windows Update is not used as a repair source.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
+        if ($AnalyzeLogs) { $plannedSteps += 'Export a structured Windows Update log timeline.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
         if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
     }
@@ -5151,6 +5297,13 @@ function Start-WURepair {
         default { $Script:ExitCodes.PhaseErrors }
     }
 
+    $wuLogTimeline = @()
+    $wuLogTimelineSummary = $null
+    if ($AnalyzeLogs -or -not [string]::IsNullOrWhiteSpace($SupportBundle)) {
+        $wuLogTimeline = @(Get-WULogTimeline -MaxEntries 200 -NoRedact:$NoRedact)
+        $wuLogTimelineSummary = Get-WULogTimelineSummary -Timeline $wuLogTimeline
+    }
+
     $reportOptions = @{
         QuickMode             = [bool]$QuickMode
         SkipDISM              = [bool]$SkipDISM
@@ -5166,6 +5319,7 @@ function Start-WURepair {
         RepairDelivery        = [bool]$RepairDelivery
         RepairServicingStack  = [bool]$RepairServicingStack
         StageSSU              = [bool]$StageSSU
+        AnalyzeLogs           = [bool]$AnalyzeLogs
         DismSource            = $DismSource
         DismResolvedSource    = if ($dismSourceSpec) { $dismSourceSpec.SourceArgument } else { $null }
         DismSourceType        = if ($dismSourceSpec) { $dismSourceSpec.SourceType } else { $null }
@@ -5178,13 +5332,13 @@ function Start-WURepair {
         NoRedact              = [bool]$NoRedact
         JournalPath           = $Script:Config.JournalPath
     }
-    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
+    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -WULogTimelineSummary $wuLogTimelineSummary -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
 
     # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
     Write-Log "Duration: $durationMin minutes"
     Write-Log "Log saved to: $($Script:Config.LogPath)"
-    $supportBundlePath = New-WUSupportBundle -Path $SupportBundle -JsonReportPath $effectiveJsonReport -ModeLabel $modeLabel -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode -PhaseResults $phaseResults -NoRedact:$NoRedact
+    $supportBundlePath = New-WUSupportBundle -Path $SupportBundle -JsonReportPath $effectiveJsonReport -ModeLabel $modeLabel -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode -PhaseResults $phaseResults -WULogTimeline $wuLogTimeline -NoRedact:$NoRedact
 
     Write-UiHeader -Title 'Repair complete' -Subtitle 'Restart is strongly recommended to finalize service, cache, and policy changes.' -Tone 'Success'
     Write-UiMetric -Label 'Duration' -Value "$durationMin minutes" -Tone 'Info'
@@ -5243,6 +5397,7 @@ function Show-Help {
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
         '-DismSource <path>    Use mounted Windows media, install.wim, or install.esd for RestoreHealth.',
         '-DismLimitAccess      Prevent DISM from using Windows Update as a repair source.',
+        '-AnalyzeLogs          Export a structured Windows Update log timeline.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
         '-SupportBundle <path> Create a redacted zip with logs, events, JSON, and CBS/DISM tails.',
         '-JournalPath <path>   Override the mutation journal JSON path.',
@@ -5275,6 +5430,7 @@ function Show-Help {
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess',
+        '.\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip',
         '.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json',
@@ -5340,6 +5496,7 @@ if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePo
 if ($args -contains '-NoRedact') { $params['NoRedact'] = $true }
 if ($args -contains '-PlainText') { $params['PlainText'] = $true; $Script:Config.PlainText = $true }
 if ($args -contains '-DismLimitAccess') { $params['DismLimitAccess'] = $true }
+if ($args -contains '-AnalyzeLogs') { $params['AnalyzeLogs'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }

@@ -92,6 +92,8 @@ $testBatches = @(
         '*resolves DISM repair sources*',
         '*builds DISM RestoreHealth*',
         '*passes DISM RestoreHealth*',
+        '*parses Windows Update log timeline*',
+        '*summarizes Windows Update log timelines*',
         '*parses CLI option values*',
         '*resolves repair phase selection*',
         '*keeps release version*',
