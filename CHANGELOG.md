@@ -2,6 +2,10 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.19.0] - 2026-06-29
+
+- Added behavior-level validation for CLI option parsing, repair phase selection, DISM source arguments, release version drift, and optional package/remediation artifact parsing.
+
 ## [v2.18.0] - 2026-06-29
 
 - Added `-DismSource <path>` for mounted Windows media, `install.wim`, or `install.esd` RestoreHealth repair sources.

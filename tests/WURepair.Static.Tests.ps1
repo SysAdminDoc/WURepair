@@ -67,7 +67,9 @@ Describe 'WURepair static contract' {
             'Resolve-DismRepairSource',
             'Get-DismRestoreHealthPlan',
             'Invoke-ComponentStoreCleanup',
-            'Invoke-DISM'
+            'Invoke-DISM',
+            'Resolve-WURepairPhaseSelection',
+            'Get-CommandLineOptionValue'
         )
     }
 
@@ -134,6 +136,8 @@ Describe 'WURepair static contract' {
             'Get-DismRestoreHealthPlan',
             'Invoke-ComponentStoreCleanup',
             'Invoke-DISM',
+            'Resolve-WURepairPhaseSelection',
+            'Get-CommandLineOptionValue',
             'sc.exe',
             'DISM',
             'Get-FileHash',
@@ -606,5 +610,68 @@ Describe 'WURepair static contract' {
         $restoreCall | Should -Contain '/RestoreHealth'
         $restoreCall | Should -Contain "/Source:WIM:${wimPath}:1"
         $restoreCall | Should -Contain '/LimitAccess'
+    }
+
+    It 'parses CLI option values for spaced and inline assignments' {
+        $arguments = @(
+            '-JsonReport', 'C:\Temp\repair.json',
+            '-SupportBundle=C:\Temp\support.zip',
+            '-DismSource', 'D:\sources\install.wim'
+        )
+
+        Get-CommandLineOptionValue -Arguments $arguments -Name '-JsonReport' | Should -Be 'C:\Temp\repair.json'
+        Get-CommandLineOptionValue -Arguments $arguments -Name '-SupportBundle' | Should -Be 'C:\Temp\support.zip'
+        Get-CommandLineOptionValue -Arguments $arguments -Name '-DismSource' | Should -Be 'D:\sources\install.wim'
+        { Get-CommandLineOptionValue -Arguments @('-JsonReport') -Name '-JsonReport' } | Should -Throw '*requires a path value*'
+    }
+
+    It 'resolves repair phase selection for full targeted and quick runs' {
+        $full = Resolve-WURepairPhaseSelection
+        $full.SelectiveMode | Should -BeFalse
+        $full.RepairServices | Should -BeTrue
+        $full.RepairDISM | Should -BeTrue
+        $full.RepairSFC | Should -BeTrue
+        $full.RepairServicingStack | Should -BeFalse
+
+        $targeted = Resolve-WURepairPhaseSelection -RepairStore -RepairDLLs
+        $targeted.SelectiveMode | Should -BeTrue
+        $targeted.RepairStore | Should -BeTrue
+        $targeted.RepairDLLs | Should -BeTrue
+        $targeted.RepairServices | Should -BeFalse
+        $targeted.RepairDISM | Should -BeFalse
+
+        $quick = Resolve-WURepairPhaseSelection -QuickMode
+        $quick.SelectiveMode | Should -BeFalse
+        $quick.RepairServices | Should -BeTrue
+        $quick.RepairDISM | Should -BeFalse
+        $quick.RepairSFC | Should -BeFalse
+    }
+
+    It 'keeps release version strings consistent across tracked docs' {
+        $versionMatch = [regex]::Match($script:Content, "Version\s*=\s*'(?<Version>\d+\.\d+\.\d+)'")
+        $versionMatch.Success | Should -BeTrue
+        $version = $versionMatch.Groups['Version'].Value
+
+        $readmePath = Join-Path $script:RepoRoot 'README.md'
+        $readme = Get-Content -LiteralPath $readmePath -Raw
+        $readme | Should -Match ("Version-{0}-orange" -f [regex]::Escape($version))
+        $readme | Should -Match ("### v{0}" -f [regex]::Escape($version))
+
+        $changelogPath = Join-Path $script:RepoRoot 'CHANGELOG.md'
+        if (Test-Path -LiteralPath $changelogPath) {
+            $changelog = Get-Content -LiteralPath $changelogPath -Raw
+            $changelog | Should -Match ("## \[v{0}\]" -f [regex]::Escape($version))
+        }
+    }
+
+    It 'wires optional package and remediation artifact parse validation' {
+        $localChecksPath = Join-Path $script:RepoRoot 'Invoke-LocalChecks.ps1'
+        $localChecks = Get-Content -LiteralPath $localChecksPath -Raw
+
+        $localChecks | Should -Match '\$artifactPatterns'
+        $localChecks | Should -Match 'Import-PowerShellDataFile'
+        $localChecks | Should -Match 'ParseFile'
+        $localChecks | Should -Match 'ps1xml'
+        $localChecks | Should -Match 'Intune'
     }
 }

@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.19.0 adds behavior-level validation and release drift checks.
     v2.18.0 adds DISM repair source fallback for mounted Windows media.
     v2.17.0 adds plain-text automation output.
     v2.16.0 adds redacted support bundle generation.
@@ -31,7 +32,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.18.0
+    Version: 2.19.0
 #>
 
 #Requires -RunAsAdministrator
@@ -47,7 +48,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.18.0'
+    Version                            = '2.19.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -4718,6 +4719,53 @@ function New-WUSupportBundle {
 # MAIN EXECUTION
 # ============================================================================
 
+function Resolve-WURepairPhaseSelection {
+    param(
+        [switch]$SkipDISM,
+        [switch]$SkipSFC,
+        [switch]$QuickMode,
+        [switch]$RepairServices,
+        [switch]$RepairDLLs,
+        [switch]$RepairStore,
+        [switch]$RepairDISM,
+        [switch]$RepairSFC,
+        [switch]$RepairNetwork,
+        [switch]$RepairWaaS,
+        [switch]$RepairDelivery,
+        [switch]$RepairServicingStack,
+        [switch]$RepairAll
+    )
+
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
+    if ($RepairAll -or (-not $selectiveMode)) {
+        $RepairServices = $true
+        $RepairDLLs     = $true
+        $RepairStore    = $true
+        $RepairDISM     = $true
+        $RepairSFC      = $true
+        $RepairNetwork  = $true
+        $RepairWaaS     = $true
+        $RepairDelivery = $true
+        $selectiveMode  = $false
+    }
+
+    if ($SkipDISM -or $QuickMode) { $RepairDISM = $false }
+    if ($SkipSFC -or $QuickMode) { $RepairSFC = $false }
+
+    return [PSCustomObject]@{
+        SelectiveMode       = [bool]$selectiveMode
+        RepairServices      = [bool]$RepairServices
+        RepairDLLs          = [bool]$RepairDLLs
+        RepairStore         = [bool]$RepairStore
+        RepairDISM          = [bool]$RepairDISM
+        RepairSFC           = [bool]$RepairSFC
+        RepairNetwork       = [bool]$RepairNetwork
+        RepairWaaS          = [bool]$RepairWaaS
+        RepairDelivery      = [bool]$RepairDelivery
+        RepairServicingStack = [bool]$RepairServicingStack
+    }
+}
+
 function Start-WURepair {
     param(
         [switch]$SkipDISM,
@@ -4759,10 +4807,20 @@ function Start-WURepair {
         return $Script:LastRunExitCode
     }
 
+    $phaseSelection = Resolve-WURepairPhaseSelection -SkipDISM:$SkipDISM -SkipSFC:$SkipSFC -QuickMode:$QuickMode -RepairServices:$RepairServices -RepairDLLs:$RepairDLLs -RepairStore:$RepairStore -RepairDISM:$RepairDISM -RepairSFC:$RepairSFC -RepairNetwork:$RepairNetwork -RepairWaaS:$RepairWaaS -RepairDelivery:$RepairDelivery -RepairServicingStack:$RepairServicingStack -RepairAll:$RepairAll
+    $selectiveMode        = $phaseSelection.SelectiveMode
+    $RepairServices       = $phaseSelection.RepairServices
+    $RepairDLLs           = $phaseSelection.RepairDLLs
+    $RepairStore          = $phaseSelection.RepairStore
+    $RepairDISM           = $phaseSelection.RepairDISM
+    $RepairSFC            = $phaseSelection.RepairSFC
+    $RepairNetwork        = $phaseSelection.RepairNetwork
+    $RepairWaaS           = $phaseSelection.RepairWaaS
+    $RepairDelivery       = $phaseSelection.RepairDelivery
+    $RepairServicingStack = $phaseSelection.RepairServicingStack
+
     $dismSourceSpec = $null
-    $initialSelectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
-    $willRunDism = (-not ($SkipDISM -or $QuickMode)) -and ($RepairDISM -or $RepairAll -or (-not $initialSelectiveMode))
-    if ($willRunDism -and -not [string]::IsNullOrWhiteSpace($DismSource)) {
+    if ($RepairDISM -and -not [string]::IsNullOrWhiteSpace($DismSource)) {
         try {
             $dismSourceSpec = Resolve-DismRepairSource -Path $DismSource
         }
@@ -4783,25 +4841,6 @@ function Start-WURepair {
     }
 
     Initialize-WUMutationJournal -Path $JournalPath
-
-    # Determine selective mode: if no specific -Repair* switch given, run all
-    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
-    if ($RepairAll -or (-not $selectiveMode)) {
-        # Full repair mode
-        $RepairServices = $true
-        $RepairDLLs     = $true
-        $RepairStore    = $true
-        $RepairDISM     = $true
-        $RepairSFC      = $true
-        $RepairNetwork  = $true
-        $RepairWaaS     = $true
-        $RepairDelivery = $true
-        $selectiveMode  = $false
-    }
-
-    # Override DISM/SFC if skip flags are set
-    if ($SkipDISM -or $QuickMode) { $RepairDISM = $false }
-    if ($SkipSFC -or $QuickMode) { $RepairSFC = $false }
 
     $startTime = Get-Date
     $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
