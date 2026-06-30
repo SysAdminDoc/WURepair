@@ -52,7 +52,10 @@ $testBatches = @(
         '*removes managed*',
         '*redacts support*',
         '*creates a redacted support*',
-        '*parses DISM*'
+        '*parses DISM*',
+        '*resolves DISM repair sources*',
+        '*builds DISM RestoreHealth*',
+        '*passes DISM RestoreHealth*'
     )
 )
 

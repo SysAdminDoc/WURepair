@@ -1,4 +1,4 @@
-﻿Describe 'WURepair static contract' {
+Describe 'WURepair static contract' {
     BeforeAll {
         $script:RepoRoot = Split-Path -Parent $PSScriptRoot
         $script:ScriptPath = Join-Path $script:RepoRoot 'WURepair.ps1'
@@ -63,7 +63,11 @@
             'Add-WUSupportBundleEventExport',
             'New-WUSupportBundle',
             'Convert-WUSizeToMegabyte',
-            'Get-ComponentStoreAnalysis'
+            'Get-ComponentStoreAnalysis',
+            'Resolve-DismRepairSource',
+            'Get-DismRestoreHealthPlan',
+            'Invoke-ComponentStoreCleanup',
+            'Invoke-DISM'
         )
     }
 
@@ -126,6 +130,10 @@
             'New-WUSupportBundle',
             'Convert-WUSizeToMegabyte',
             'Get-ComponentStoreAnalysis',
+            'Resolve-DismRepairSource',
+            'Get-DismRestoreHealthPlan',
+            'Invoke-ComponentStoreCleanup',
+            'Invoke-DISM',
             'sc.exe',
             'DISM',
             'Get-FileHash',
@@ -526,5 +534,77 @@
         $analysis.ExplorerActualDeltaMB | Should -Be 1536
         $analysis.ReclaimablePackages | Should -Be 3
         $analysis.CleanupRecommended | Should -BeTrue
+    }
+
+    It 'resolves DISM repair sources from mounted media and image files' {
+        $mountedRoot = Join-Path $TestDrive 'MountedWindows'
+        New-Item -Path (Join-Path $mountedRoot 'Windows\WinSxS') -ItemType Directory -Force | Out-Null
+
+        $mountedSpec = Resolve-DismRepairSource -Path $mountedRoot
+        $mountedSpec.SourceType | Should -Be 'MountedWindowsImage'
+        $mountedSpec.SourceArgument | Should -Be (Join-Path $mountedRoot 'Windows')
+
+        $isoRoot = Join-Path $TestDrive 'IsoRoot'
+        New-Item -Path (Join-Path $isoRoot 'sources') -ItemType Directory -Force | Out-Null
+        $esdPath = Join-Path $isoRoot 'sources\install.esd'
+        Set-Content -LiteralPath $esdPath -Value 'mock esd'
+
+        $isoSpec = Resolve-DismRepairSource -Path $isoRoot
+        $isoSpec.SourceType | Should -Be 'ESD'
+        $isoSpec.SourceArgument | Should -Be "ESD:${esdPath}:1"
+
+        { Resolve-DismRepairSource -Path (Join-Path $TestDrive 'missing.wim') } | Should -Throw '*does not exist*'
+    }
+
+    It 'builds DISM RestoreHealth arguments with source and limit access' {
+        $wimPath = Join-Path $TestDrive 'install.wim'
+        Set-Content -LiteralPath $wimPath -Value 'mock wim'
+
+        $plan = Get-DismRestoreHealthPlan -DismSource $wimPath -DismLimitAccess
+
+        $plan.Arguments | Should -Contain '/Online'
+        $plan.Arguments | Should -Contain '/Cleanup-Image'
+        $plan.Arguments | Should -Contain '/RestoreHealth'
+        $plan.Arguments | Should -Contain "/Source:WIM:${wimPath}:1"
+        $plan.Arguments | Should -Contain '/LimitAccess'
+        $plan.Source.SourceType | Should -Be 'WIM'
+    }
+
+    It 'passes DISM RestoreHealth source arguments through mocked DISM process' {
+        $wimPath = Join-Path $TestDrive 'install.wim'
+        Set-Content -LiteralPath $wimPath -Value 'mock wim'
+        $script:DismCalls = @()
+
+        function global:DISM {
+            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+
+            $script:DismCalls += ,@($Arguments)
+            cmd.exe /c exit 0 | Out-Null
+
+            if ($Arguments -contains '/ScanHealth') {
+                return @('The component store is repairable.')
+            }
+
+            if ($Arguments -contains '/AnalyzeComponentStore') {
+                return @(
+                    'Actual Size of Component Store : 6.00 GB'
+                    'Backups and Disabled Features : 256 MB'
+                    'Cache and Temporary Data : 128 MB'
+                    'Number of Reclaimable Packages : 0'
+                    'Component Store Cleanup Recommended : No'
+                )
+            }
+
+            return @('OK')
+        }
+
+        Invoke-DISM -DismSource $wimPath -DismLimitAccess
+
+        $restoreCall = @($script:DismCalls | Where-Object { $_ -contains '/RestoreHealth' })[0]
+        $restoreCall | Should -Contain '/Online'
+        $restoreCall | Should -Contain '/Cleanup-Image'
+        $restoreCall | Should -Contain '/RestoreHealth'
+        $restoreCall | Should -Contain "/Source:WIM:${wimPath}:1"
+        $restoreCall | Should -Contain '/LimitAccess'
     }
 }
