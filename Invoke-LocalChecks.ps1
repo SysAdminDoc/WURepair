@@ -24,6 +24,42 @@ if (-not $SkipAnalyzer) {
     }
 }
 
+$artifactPatterns = @(
+    @{ Path = $repoRoot; Filter = '*.psd1'; Kind = 'Data' },
+    @{ Path = $repoRoot; Filter = '*.psm1'; Kind = 'Script' },
+    @{ Path = $repoRoot; Filter = '*.ps1xml'; Kind = 'Xml' },
+    @{ Path = (Join-Path $repoRoot 'Intune'); Filter = '*.ps1'; Kind = 'Script' },
+    @{ Path = (Join-Path $repoRoot 'Remediation'); Filter = '*.ps1'; Kind = 'Script' },
+    @{ Path = (Join-Path $repoRoot 'Package'); Filter = '*.ps1'; Kind = 'Script' }
+)
+
+foreach ($pattern in $artifactPatterns) {
+    if (-not (Test-Path -LiteralPath $pattern.Path)) {
+        continue
+    }
+
+    $artifacts = @(Get-ChildItem -LiteralPath $pattern.Path -Filter $pattern.Filter -File -ErrorAction Stop)
+    foreach ($artifact in $artifacts) {
+        switch ($pattern.Kind) {
+            'Data' {
+                Import-PowerShellDataFile -LiteralPath $artifact.FullName -ErrorAction Stop | Out-Null
+            }
+            'Xml' {
+                [xml](Get-Content -LiteralPath $artifact.FullName -Raw -ErrorAction Stop) | Out-Null
+            }
+            default {
+                $artifactTokens = $null
+                $artifactParseErrors = $null
+                [System.Management.Automation.Language.Parser]::ParseFile($artifact.FullName, [ref]$artifactTokens, [ref]$artifactParseErrors) | Out-Null
+                if ($artifactParseErrors.Count -gt 0) {
+                    $artifactParseErrors | ForEach-Object { Write-Error "$($artifact.FullName): $($_.Message)" }
+                    exit 1
+                }
+            }
+        }
+    }
+}
+
 Import-Module Pester -MinimumVersion 5.0 -ErrorAction Stop
 $testPath = Join-Path $repoRoot 'tests'
 $testBatches = @(
@@ -55,7 +91,11 @@ $testBatches = @(
         '*parses DISM*',
         '*resolves DISM repair sources*',
         '*builds DISM RestoreHealth*',
-        '*passes DISM RestoreHealth*'
+        '*passes DISM RestoreHealth*',
+        '*parses CLI option values*',
+        '*resolves repair phase selection*',
+        '*keeps release version*',
+        '*wires optional package*'
     )
 )
 
