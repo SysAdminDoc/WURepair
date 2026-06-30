@@ -2,6 +2,12 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.22.0] - 2026-06-29
+
+- Added a versioned endpoint and policy knowledge manifest with Microsoft Learn source URLs.
+- Hosts cleanup and diagnostics now use manifest-backed matching for regional Delivery Optimization endpoints.
+- Policy repair now consumes manifest-defined removable policy values while preserving managed update-source guardrails.
+
 ## [v2.21.0] - 2026-06-29
 
 - Added `WURepair.psd1` and `WURepair.psm1` module metadata/wrappers for phase-oriented invocation.

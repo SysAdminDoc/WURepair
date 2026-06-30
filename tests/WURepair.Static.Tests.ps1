@@ -48,6 +48,12 @@ Describe 'WURepair static contract' {
             'ConvertTo-WULogTimelineEntry',
             'Get-WULogTimeline',
             'Get-WULogTimelineSummary',
+            'New-WURepairKnowledgeManifest',
+            'Get-WURepairKnowledgeManifest',
+            'Get-WUMicrosoftUpdateDomainRules',
+            'Get-WURemovablePolicyValues',
+            'Test-WUMicrosoftUpdateDomainRuleMatch',
+            'Get-WUBlockedMicrosoftDomainsFromHostsLine',
             'Get-WURegistryValue',
             'Test-WUConfiguredPolicyValue',
             'Get-WUManagedUpdateSourceGuardrail',
@@ -87,7 +93,8 @@ Describe 'WURepair static contract' {
             Ui                                 = @{}
         }
         $Script:CurrentPhaseTelemetry = $null
-        $Script:MicrosoftDomains = @('update.microsoft.com', 'download.windowsupdate.com')
+        $Script:WURepairKnowledgeManifest = New-WURepairKnowledgeManifest
+        $Script:MicrosoftDomains = @(Get-WUMicrosoftUpdateDomainRules | ForEach-Object { $_.Pattern })
         $Script:WUErrorReferenceUrl = 'https://learn.microsoft.com/windows/deployment/update/windows-update-error-reference'
         $Script:WUErrorSearchUrl = 'https://www.bing.com/search?q='
         $Script:WUErrorArticleMap = @{
@@ -120,6 +127,12 @@ Describe 'WURepair static contract' {
             'ConvertTo-WULogTimelineEntry',
             'Get-WULogTimeline',
             'Get-WULogTimelineSummary',
+            'New-WURepairKnowledgeManifest',
+            'Get-WURepairKnowledgeManifest',
+            'Get-WUMicrosoftUpdateDomainRules',
+            'Get-WURemovablePolicyValues',
+            'Test-WUMicrosoftUpdateDomainRuleMatch',
+            'Get-WUBlockedMicrosoftDomainsFromHostsLine',
             'Get-WURegistryValue',
             'Test-WUConfiguredPolicyValue',
             'Get-WUManagedUpdateSourceGuardrail',
@@ -271,6 +284,42 @@ Describe 'WURepair static contract' {
         $wufbGuardrail = Get-WUManagedUpdateSourceGuardrail -SetQualitySource 1 -SetFeatureSource 1
         $wufbGuardrail.IsManagedSource | Should -BeTrue
         $wufbGuardrail.Reason | Should -Match 'WUfB Quality'
+    }
+
+    It 'defines a sourced endpoint and policy knowledge manifest' {
+        $manifest = Get-WURepairKnowledgeManifest
+        $manifest.SchemaVersion | Should -Be 1
+        $manifest.KnowledgeVersion | Should -Match '^\d{4}\.\d{2}\.\d{2}$'
+
+        foreach ($sourceUrl in @($manifest.Sources)) {
+            $sourceUrl | Should -Match '^https://learn\.microsoft\.com/'
+        }
+
+        $domains = @($manifest.MicrosoftUpdateDomains)
+        $domains.Pattern | Should -Contain 'download.windowsupdate.com'
+        $domains.Pattern | Should -Contain '*.dl.delivery.mp.microsoft.com'
+        $domains.Pattern | Should -Contain 'tlu.dl.delivery.mp.microsoft.com'
+        ($domains | Where-Object { $_.Pattern -eq 'tlu.dl.delivery.mp.microsoft.com' } | Select-Object -First 1).SourceUrl | Should -Match 'delivery-optimization-endpoints'
+
+        $policies = @($manifest.RemovablePolicyValues)
+        $policies.Name | Should -Contain 'DisableWindowsUpdateAccess'
+        $policies.Name | Should -Contain 'DoNotConnectToWindowsUpdateInternetLocations'
+        $policies.Name | Should -Contain 'UseWUServer'
+        ($policies | Where-Object { $_.Name -eq 'UseWUServer' } | Select-Object -First 1).ManagedSource | Should -BeTrue
+    }
+
+    It 'matches regional Microsoft update hosts through manifest domain rules' {
+        $regionalBlocks = Get-WUBlockedMicrosoftDomainsFromHostsLine -Line '0.0.0.0 2.tlu.dl.delivery.mp.microsoft.com # regional DO endpoint'
+        $regionalBlocks | Should -Contain '2.tlu.dl.delivery.mp.microsoft.com'
+
+        $doBlocks = Get-WUBlockedMicrosoftDomainsFromHostsLine -Line '::1 geo.prod.do.dsp.mp.microsoft.com'
+        $doBlocks | Should -Contain 'geo.prod.do.dsp.mp.microsoft.com'
+
+        $updateBlocks = Get-WUBlockedMicrosoftDomainsFromHostsLine -Line '127.0.0.1 download.windowsupdate.com'
+        $updateBlocks | Should -Contain 'download.windowsupdate.com'
+
+        $unrelatedBlocks = Get-WUBlockedMicrosoftDomainsFromHostsLine -Line '127.0.0.1 notwindowsupdate.com'
+        @($unrelatedBlocks).Count | Should -Be 0
     }
 
     It 'preserves managed update-source policies unless reset is explicit' {
@@ -724,6 +773,10 @@ Describe 'WURepair static contract' {
             $changelog = Get-Content -LiteralPath $changelogPath -Raw
             $changelog | Should -Match ("## \[v{0}\]" -f [regex]::Escape($version))
         }
+
+        $manifestPath = Join-Path $script:RepoRoot 'WURepair.psd1'
+        $moduleManifest = Test-ModuleManifest -Path $manifestPath
+        $moduleManifest.Version.ToString() | Should -Be $version
     }
 
     It 'wires optional package and remediation artifact parse validation' {

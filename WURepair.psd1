@@ -1,6 +1,6 @@
 @{
     RootModule        = 'WURepair.psm1'
-    ModuleVersion     = '2.21.0'
+    ModuleVersion     = '2.22.0'
     GUID              = '4d2cbad8-1eb2-4a0d-8b94-ccb86fb723ce'
     Author            = 'SysAdminDoc'
     CompanyName       = 'SysAdminDoc'
@@ -35,7 +35,7 @@
             Tags         = @('WindowsUpdate', 'Repair', 'Diagnostics', 'RMM', 'Intune', 'WSUS', 'DISM')
             LicenseUri   = 'https://github.com/SysAdminDoc/WURepair/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/SysAdminDoc/WURepair'
-            ReleaseNotes = 'Adds module metadata and local release packaging with checksums and optional signing.'
+            ReleaseNotes = 'Adds a versioned endpoint and policy knowledge manifest for hosts cleanup and policy repair.'
         }
     }
 }

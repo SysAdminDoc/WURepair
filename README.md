@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.21.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.22.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -25,7 +25,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 ## Features
 
 ### 🌐 Network & Connectivity Repairs
-- **Hosts File Cleanup**: Removes blocks for 25+ Microsoft update domains
+- **Hosts File Cleanup**: Removes blocks for 25+ Microsoft update domains using a versioned Microsoft endpoint manifest, including regional Delivery Optimization hosts
 - **SSL/TLS Repair**: Enables TLS 1.2, configures .NET for strong cryptography
 - **Firewall Rules**: Removes blocking rules, ensures update services are allowed
 - **Winsock/TCP Reset**: Full network stack reset
@@ -40,8 +40,8 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Delivery Optimization Reset**: Clears Delivery Optimization cache and removes stale download-mode policy values
 
 ### 📋 Policy & Registry Repairs
-- **Removes Blocking Policies**: Clears 10+ registry values that disable Windows Update
-- **WSUS Detection**: Identifies WSUS/SUP/WUfB source policy and preserves managed-source values unless explicitly reset
+- **Removes Blocking Policies**: Clears manifest-defined registry values that disable Windows Update
+- **WSUS Detection**: Identifies WSUS/SUP/WUfB source policy and preserves manifest-marked managed-source values unless explicitly reset
 - **Registry Cleanup**: Removes stuck reboot flags and pending update markers
 - **Group Policy Refresh**: Forces policy update after changes
 
@@ -86,7 +86,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.21.0
+    Windows Update Repair Tool v2.22.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -362,7 +362,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.21.0 Flow                      │
+│                      WURepair v2.22.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -410,6 +410,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.22.0
+
+- Versioned endpoint/policy knowledge manifest used by hosts cleanup and policy repair.
+- Regional Delivery Optimization host matching covers `*.dl.delivery.mp.microsoft.com` and `*.prod.do.dsp.mp.microsoft.com` entries in blocked hosts files.
 
 ### v2.21.0
 - Added `WURepair.psd1` and `WURepair.psm1` module metadata/wrappers for phase-oriented invocation

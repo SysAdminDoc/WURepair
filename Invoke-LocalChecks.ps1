@@ -94,6 +94,8 @@ $testBatches = @(
         '*validates Catalog*',
         '*rejects Catalog*',
         '*classifies WSUS*',
+        '*defines a sourced endpoint*',
+        '*matches regional Microsoft update hosts*',
         '*preserves managed*',
         '*removes managed*',
         '*redacts support*',
