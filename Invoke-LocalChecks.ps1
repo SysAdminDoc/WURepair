@@ -30,7 +30,8 @@ $artifactPatterns = @(
     @{ Path = $repoRoot; Filter = '*.ps1xml'; Kind = 'Xml' },
     @{ Path = (Join-Path $repoRoot 'Intune'); Filter = '*.ps1'; Kind = 'Script' },
     @{ Path = (Join-Path $repoRoot 'Remediation'); Filter = '*.ps1'; Kind = 'Script' },
-    @{ Path = (Join-Path $repoRoot 'Package'); Filter = '*.ps1'; Kind = 'Script' }
+    @{ Path = (Join-Path $repoRoot 'Package'); Filter = '*.ps1'; Kind = 'Script' },
+    @{ Path = (Join-Path $repoRoot 'tools'); Filter = '*.ps1'; Kind = 'Script' }
 )
 
 foreach ($pattern in $artifactPatterns) {
@@ -42,7 +43,16 @@ foreach ($pattern in $artifactPatterns) {
     foreach ($artifact in $artifacts) {
         switch ($pattern.Kind) {
             'Data' {
-                Import-PowerShellDataFile -LiteralPath $artifact.FullName -ErrorAction Stop | Out-Null
+                $artifactTokens = $null
+                $artifactParseErrors = $null
+                [System.Management.Automation.Language.Parser]::ParseFile($artifact.FullName, [ref]$artifactTokens, [ref]$artifactParseErrors) | Out-Null
+                if ($artifactParseErrors.Count -gt 0) {
+                    $artifactParseErrors | ForEach-Object { Write-Error "$($artifact.FullName): $($_.Message)" }
+                    exit 1
+                }
+                if ($artifact.Extension -ieq '.psd1') {
+                    Test-ModuleManifest -Path $artifact.FullName -ErrorAction Stop | Out-Null
+                }
             }
             'Xml' {
                 [xml](Get-Content -LiteralPath $artifact.FullName -Raw -ErrorAction Stop) | Out-Null
@@ -97,7 +107,9 @@ $testBatches = @(
         '*parses CLI option values*',
         '*resolves repair phase selection*',
         '*keeps release version*',
-        '*wires optional package*'
+        '*wires optional package*',
+        '*validates module manifest*',
+        '*wires release packaging*'
     )
 )
 

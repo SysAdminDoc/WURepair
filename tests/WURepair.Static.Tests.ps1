@@ -731,9 +731,36 @@ Describe 'WURepair static contract' {
         $localChecks = Get-Content -LiteralPath $localChecksPath -Raw
 
         $localChecks | Should -Match '\$artifactPatterns'
-        $localChecks | Should -Match 'Import-PowerShellDataFile'
+        $localChecks | Should -Match 'Test-ModuleManifest'
         $localChecks | Should -Match 'ParseFile'
         $localChecks | Should -Match 'ps1xml'
         $localChecks | Should -Match 'Intune'
+    }
+
+    It 'validates module manifest metadata and exported wrappers' {
+        $manifestPath = Join-Path $script:RepoRoot 'WURepair.psd1'
+        Test-Path -LiteralPath $manifestPath | Should -BeTrue
+
+        $manifest = Test-ModuleManifest -Path $manifestPath
+        $manifest.Name | Should -Be 'WURepair'
+        $manifest.Version.ToString() | Should -Match '^\d+\.\d+\.\d+'
+        $manifest.PowerShellVersion.ToString() | Should -Be '5.1'
+        $manifest.ExportedFunctions.Keys | Should -Contain 'Invoke-WURepair'
+        $manifest.ExportedFunctions.Keys | Should -Contain 'Repair-WURepairDism'
+        $manifest.PrivateData.PSData.Tags | Should -Contain 'WindowsUpdate'
+        $manifest.PrivateData.PSData.LicenseUri | Should -Match 'LICENSE'
+    }
+
+    It 'wires release packaging to local checks signing catalogs and checksums' {
+        $packageScriptPath = Join-Path $script:RepoRoot 'tools\Build-WURepairPackage.ps1'
+        Test-Path -LiteralPath $packageScriptPath | Should -BeTrue
+
+        $packageScript = Get-Content -LiteralPath $packageScriptPath -Raw
+        $packageScript | Should -Match 'Invoke-LocalChecks\.ps1'
+        $packageScript | Should -Match 'Set-AuthenticodeSignature'
+        $packageScript | Should -Match 'New-FileCatalog'
+        $packageScript | Should -Match 'SHA256SUMS\.txt'
+        $packageScript | Should -Match 'WURepair-release-v'
+        $packageScript | Should -Match 'WURepair-module'
     }
 }
