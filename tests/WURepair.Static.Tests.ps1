@@ -126,6 +126,9 @@ Describe 'WURepair static contract' {
             'Get-DismRestoreHealthPlan',
             'Invoke-ComponentStoreCleanup',
             'Invoke-DISM',
+            'ConvertTo-WUBitLockerProtectionStatus',
+            'Get-WUSystemDriveBitLockerStatus',
+            'Get-WURepairReadiness',
             'Get-DiagnosticReportDelta',
             'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
@@ -207,10 +210,14 @@ Describe 'WURepair static contract' {
             'Get-DismRestoreHealthPlan',
             'Invoke-ComponentStoreCleanup',
             'Invoke-DISM',
+            'ConvertTo-WUBitLockerProtectionStatus',
+            'Get-WUSystemDriveBitLockerStatus',
+            'Get-WURepairReadiness',
             'Get-DiagnosticReportDelta',
             'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
             'Get-CommandLineOptionValue',
+            'Get-BitLockerVolume',
             'sc.exe',
             'DISM',
             'Get-FileHash',
@@ -463,15 +470,52 @@ Describe 'WURepair static contract' {
                 IsValid            = $true
             }
         )
+        $readiness = [PSCustomObject]@{
+            SchemaVersion    = '1.0'
+            Status           = 'Blocked'
+            CanProceed       = $false
+            RequiresOverride = $true
+            OverrideApplied  = $false
+            PendingReboot    = $true
+            BlockingReasons  = @('PendingReboot')
+            Warnings         = @('BitLockerProtected')
+            BitLocker        = [PSCustomObject]@{
+                SchemaVersion        = '1.0'
+                Available            = $true
+                QuerySucceeded       = $true
+                MountPoint           = 'C:'
+                ProtectionStatus     = 'On'
+                LockStatus           = 'Unlocked'
+                VolumeStatus         = 'FullyEncrypted'
+                EncryptionPercentage = 100
+                IsProtected          = $true
+                QueryError           = $null
+                RecommendedAction    = 'Verify the BitLocker recovery key is escrowed before restart-heavy repair.'
+            }
+            RecommendedAction = 'Restart once before repair when possible, and verify the BitLocker recovery key is escrowed before any repair-triggered restart.'
+        }
         $preReport = @{
-            Services      = @([PSCustomObject]@{ Component = 'Windows Update'; Status = 'Stopped' })
-            PendingReboot = $true
-            LastUpdate    = '2026-06-01'
+            Services        = @([PSCustomObject]@{ Component = 'Windows Update'; Status = 'Stopped' })
+            PendingReboot   = $true
+            LastUpdate      = '2026-06-01'
+            RepairReadiness = $readiness
         }
         $postReport = @{
-            Services      = @([PSCustomObject]@{ Component = 'Windows Update'; Status = 'Running' })
-            PendingReboot = $false
-            LastUpdate    = '2026-06-30'
+            Services        = @([PSCustomObject]@{ Component = 'Windows Update'; Status = 'Running' })
+            PendingReboot   = $false
+            LastUpdate      = '2026-06-30'
+            RepairReadiness = [PSCustomObject]@{
+                SchemaVersion    = '1.0'
+                Status           = 'Ready'
+                CanProceed       = $true
+                RequiresOverride = $false
+                OverrideApplied  = $false
+                PendingReboot    = $false
+                BlockingReasons  = @()
+                Warnings         = @()
+                BitLocker        = $readiness.BitLocker
+                RecommendedAction = 'No readiness blockers detected.'
+            }
         }
         $phaseResults = @(
             [PSCustomObject]@{
@@ -488,9 +532,11 @@ Describe 'WURepair static contract' {
             }
         )
         $options = @{
-            Unattended    = $true
-            PlainText     = $true
-            SupportBundle = 'C:\Temp\WURepair-support.zip'
+            Unattended             = $true
+            PlainText              = $true
+            OverrideReadinessBlock = $false
+            RepairReadiness        = $readiness
+            SupportBundle          = 'C:\Temp\WURepair-support.zip'
         }
         $timelineSummary = [PSCustomObject]@{
             EntryCount   = 2
@@ -534,6 +580,11 @@ Describe 'WURepair static contract' {
         $report.Tool | Should -Be 'WURepair'
         $report.Version | Should -Be '9.9.9-test'
         $report.Options.Unattended | Should -BeTrue
+        $report.Options.OverrideReadinessBlock | Should -BeFalse
+        $report.Options.RepairReadiness.Status | Should -Be 'Blocked'
+        $report.PreRepair.RepairReadiness.BlockingReasons | Should -Contain 'PendingReboot'
+        $report.PreRepair.RepairReadiness.BitLocker.ProtectionStatus | Should -Be 'On'
+        $report.PostRepair.RepairReadiness.Status | Should -Be 'Ready'
         $report.PostRepairConnectivity | Should -Be 'AllEndpointsReachable'
         $report.MutationJournal.EntryCount | Should -Be 1
         $report.CatalogPackageValidation[0].SHA256 | Should -Be 'ABCDEF123456'
@@ -541,6 +592,41 @@ Describe 'WURepair static contract' {
         $report.PhaseResults[0].Name | Should -Be 'Reset WU Services'
         $report.Delta.ServiceChanges[0].Component | Should -Be 'Windows Update'
         $report.Delta.ChangedFields.Key | Should -Contain 'PendingReboot'
+    }
+
+    It 'builds repair readiness from pending reboot and BitLocker state' {
+        function global:Get-BitLockerVolume {
+            param([string]$MountPoint)
+
+            [PSCustomObject]@{
+                MountPoint           = $MountPoint
+                ProtectionStatus     = 'On'
+                LockStatus           = 'Unlocked'
+                VolumeStatus         = 'FullyEncrypted'
+                EncryptionPercentage = 100
+            }
+        }
+
+        try {
+            $readiness = Get-WURepairReadiness -DiagnosticReport @{ PendingReboot = 'Yes' }
+            $readiness.Status | Should -Be 'Blocked'
+            $readiness.CanProceed | Should -BeFalse
+            $readiness.RequiresOverride | Should -BeTrue
+            $readiness.OverrideApplied | Should -BeFalse
+            $readiness.BlockingReasons | Should -Contain 'PendingReboot'
+            $readiness.Warnings | Should -Contain 'BitLockerProtected'
+            $readiness.BitLocker.ProtectionStatus | Should -Be 'On'
+            $readiness.BitLocker.IsProtected | Should -BeTrue
+
+            $override = Get-WURepairReadiness -DiagnosticReport @{ PendingReboot = 'Yes' } -OverrideReadinessBlock
+            $override.Status | Should -Be 'Override'
+            $override.CanProceed | Should -BeTrue
+            $override.OverrideApplied | Should -BeTrue
+            $override.BlockingReasons | Should -Contain 'PendingReboot'
+        }
+        finally {
+            Remove-Item -LiteralPath 'Function:\Get-BitLockerVolume' -Force -ErrorAction SilentlyContinue
+        }
     }
 
     It 'creates a redacted support bundle zip with manifest and core artifacts' {
