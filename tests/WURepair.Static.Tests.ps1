@@ -126,6 +126,8 @@ Describe 'WURepair static contract' {
             'Get-DismRestoreHealthPlan',
             'Invoke-ComponentStoreCleanup',
             'Invoke-DISM',
+            'Get-DiagnosticReportDelta',
+            'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
             'Get-CommandLineOptionValue'
         )
@@ -205,6 +207,8 @@ Describe 'WURepair static contract' {
             'Get-DismRestoreHealthPlan',
             'Invoke-ComponentStoreCleanup',
             'Invoke-DISM',
+            'Get-DiagnosticReportDelta',
+            'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
             'Get-CommandLineOptionValue',
             'sc.exe',
@@ -443,6 +447,102 @@ Describe 'WURepair static contract' {
         }
     }
 
+    It 'generates a JSON report fixture with stable schema fields' {
+        $Script:Config.LogPath = Join-Path $TestDrive 'WURepair.log'
+        $Script:Config.JournalPath = Join-Path $TestDrive 'WURepair_Journal.json'
+        $Script:Config.Version = '9.9.9-test'
+        Set-Content -LiteralPath $Script:Config.LogPath -Value 'log fixture'
+        Initialize-WUMutationJournal -Path $Script:Config.JournalPath
+        Add-WUMutationJournalEntry -Category 'Registry' -Action 'RemoveValue' -Target 'HKLM:\Software\Test' -Before @{ Value = 1 } -After @{ Value = $null } -RollbackType 'RestoreRegistryValue' -RollbackData @{ Path = 'HKLM:\Software\Test'; Name = 'Value' } -Succeeded $true
+        $Script:CatalogPackageValidationResults = @(
+            [PSCustomObject]@{
+                Path               = 'C:\Temp\ssu.msu'
+                SHA256             = 'ABCDEF123456'
+                AuthenticodeStatus = 'Valid'
+                IsMicrosoftSigned  = $true
+                IsValid            = $true
+            }
+        )
+        $preReport = @{
+            Services      = @([PSCustomObject]@{ Component = 'Windows Update'; Status = 'Stopped' })
+            PendingReboot = $true
+            LastUpdate    = '2026-06-01'
+        }
+        $postReport = @{
+            Services      = @([PSCustomObject]@{ Component = 'Windows Update'; Status = 'Running' })
+            PendingReboot = $false
+            LastUpdate    = '2026-06-30'
+        }
+        $phaseResults = @(
+            [PSCustomObject]@{
+                Index           = 1
+                Name            = 'Reset WU Services'
+                Status          = 'Success'
+                Changed         = $true
+                Warnings        = 0
+                Errors          = 0
+                Exception       = $null
+                StartedAt       = '2026-07-01T01:00:00.0000000Z'
+                EndedAt         = '2026-07-01T01:00:05.0000000Z'
+                DurationSeconds = 5
+            }
+        )
+        $options = @{
+            Unattended    = $true
+            PlainText     = $true
+            SupportBundle = 'C:\Temp\WURepair-support.zip'
+        }
+        $timelineSummary = [PSCustomObject]@{
+            EntryCount   = 2
+            ErrorCount   = 1
+            WarningCount = 1
+            Sources      = @('WindowsUpdate.log')
+            TopCodes     = @([PSCustomObject]@{ Code = '0x80240016'; Count = 1 })
+        }
+        $reportPath = Join-Path $TestDrive 'WURepair-report.json'
+
+        Write-JsonRepairReport -Path $reportPath -StartTime ([datetime]'2026-07-01T01:00:00Z') -EndTime ([datetime]'2026-07-01T01:00:05Z') -Duration ([timespan]::FromSeconds(5)) -ModeLabel 'Full repair' -SelectiveMode $false -PreReport $preReport -PostReport $postReport -PostConnectivity $true -PhaseResults $phaseResults -Options $options -WULogTimelineSummary $timelineSummary -OverallStatus 'Success' -ExitCode 0
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+        $requiredFields = @(
+            'SchemaVersion',
+            'Tool',
+            'Version',
+            'StartedAt',
+            'EndedAt',
+            'DurationSeconds',
+            'Mode',
+            'SelectiveMode',
+            'OverallStatus',
+            'ExitCode',
+            'Options',
+            'LogPath',
+            'MutationJournalPath',
+            'MutationJournal',
+            'CatalogPackageValidation',
+            'WindowsUpdateLogTimeline',
+            'PostRepairConnectivity',
+            'PhaseResults',
+            'Delta',
+            'PreRepair',
+            'PostRepair'
+        )
+        foreach ($field in $requiredFields) {
+            $report.PSObject.Properties.Name | Should -Contain $field
+        }
+        $report.SchemaVersion | Should -Be '1.0'
+        $report.Tool | Should -Be 'WURepair'
+        $report.Version | Should -Be '9.9.9-test'
+        $report.Options.Unattended | Should -BeTrue
+        $report.PostRepairConnectivity | Should -Be 'AllEndpointsReachable'
+        $report.MutationJournal.EntryCount | Should -Be 1
+        $report.CatalogPackageValidation[0].SHA256 | Should -Be 'ABCDEF123456'
+        $report.WindowsUpdateLogTimeline.EntryCount | Should -Be 2
+        $report.PhaseResults[0].Name | Should -Be 'Reset WU Services'
+        $report.Delta.ServiceChanges[0].Component | Should -Be 'Windows Update'
+        $report.Delta.ChangedFields.Key | Should -Contain 'PendingReboot'
+    }
+
     It 'creates a redacted support bundle zip with manifest and core artifacts' {
         $originalUserName = $env:USERNAME
         $originalUserProfile = $env:USERPROFILE
@@ -497,6 +597,27 @@ Describe 'WURepair static contract' {
 
                 $logContent | Should -Not -Match 'Alice'
                 $logContent | Should -Not -Match 'DESKTOP-TEST'
+
+                $manifestEntry = $zip.GetEntry('manifest.json')
+                $manifestReader = New-Object System.IO.StreamReader($manifestEntry.Open())
+                try {
+                    $manifest = $manifestReader.ReadToEnd() | ConvertFrom-Json
+                }
+                finally {
+                    $manifestReader.Dispose()
+                }
+
+                $manifest.SchemaVersion | Should -Be '1.0'
+                $manifest.Tool | Should -Be 'WURepair'
+                $manifest.Version | Should -Be '9.9.9-test'
+                $manifest.Redaction | Should -Be 'Enabled'
+                $manifest.ComputerName | Should -Not -Match 'DESKTOP-TEST'
+                $manifest.UserName | Should -Not -Match 'Alice'
+                $manifestRelativePaths = @($manifest.Files.RelativePath | ForEach-Object { [string]$_ -replace '\\', '/' })
+                $manifestRelativePaths | Should -Contain 'WURepair.log'
+                $manifestRelativePaths | Should -Contain 'WURepair-report.json'
+                $manifestRelativePaths | Should -Contain 'logs/WURepair-wulog.json'
+                $manifestRelativePaths | Should -Contain 'events/WURepair-Application.json'
             }
             finally {
                 $zip.Dispose()

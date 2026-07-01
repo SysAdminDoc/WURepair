@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.25.0 adds JSON report and support-bundle schema fixture tests.
     v2.24.0 adds public option parity contract tests.
     v2.23.0 runs the complete Pester suite in local validation.
     v2.22.0 adds a versioned endpoint and policy knowledge manifest.
@@ -37,7 +38,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.24.0
+    Version: 2.25.0
 #>
 
 #Requires -RunAsAdministrator
@@ -53,7 +54,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.24.0'
+    Version                            = '2.25.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -4928,6 +4929,7 @@ function New-WUSupportBundle {
             }
         })
         $manifest = [ordered]@{
+            SchemaVersion = '1.0'
             Tool          = 'WURepair'
             Version       = $Script:Config.Version
             CreatedAt     = (Get-Date).ToString('o')
