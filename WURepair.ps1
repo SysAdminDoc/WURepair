@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.27.0 records system restore-point outcomes in reports and support bundles.
     v2.26.0 adds repair-readiness gating for pending reboot and BitLocker risk.
     v2.25.0 adds JSON report and support-bundle schema fixture tests.
     v2.24.0 adds public option parity contract tests.
@@ -39,7 +40,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.26.0
+    Version: 2.27.0
 #>
 
 #Requires -RunAsAdministrator
@@ -55,7 +56,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.26.0'
+    Version                            = '2.27.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -4792,6 +4793,7 @@ function Write-JsonRepairReport {
         [bool]$PostConnectivity,
         [array]$PhaseResults,
         [hashtable]$Options,
+        [object]$RestorePointOutcome,
         [object]$WULogTimelineSummary,
         [string]$OverallStatus,
         [int]$ExitCode
@@ -4824,6 +4826,7 @@ function Write-JsonRepairReport {
             MutationJournalPath    = $Script:Config.JournalPath
             MutationJournal        = Get-WUMutationJournalSummary
             CatalogPackageValidation = @($Script:CatalogPackageValidationResults)
+            RestorePoint           = $RestorePointOutcome
             WindowsUpdateLogTimeline = $WULogTimelineSummary
             PostRepairConnectivity = if ($PostConnectivity) { 'AllEndpointsReachable' } else { 'SomeEndpointsUnreachable' }
             PhaseResults           = $PhaseResults
@@ -5026,6 +5029,7 @@ function New-WUSupportBundle {
         [string]$OverallStatus,
         [int]$ExitCode,
         [object[]]$PhaseResults,
+        [object]$RestorePointOutcome,
         [object[]]$WULogTimeline,
         [switch]$NoRedact
     )
@@ -5104,6 +5108,7 @@ function New-WUSupportBundle {
             Redaction     = if ($NoRedact) { 'Disabled' } else { 'Enabled' }
             LogPath       = ConvertTo-WUSupportBundleText -Text $Script:Config.LogPath -NoRedact:$NoRedact
             JsonReport    = ConvertTo-WUSupportBundleText -Text $JsonReportPath -NoRedact:$NoRedact
+            RestorePoint  = $RestorePointOutcome
             PhaseResults  = $PhaseResults
             Files         = $manifestFiles
         }
@@ -5172,6 +5177,87 @@ function Resolve-WURepairPhaseSelection {
         RepairDelivery      = [bool]$RepairDelivery
         RepairServicingStack = [bool]$RepairServicingStack
     }
+}
+
+function Get-WURestorePointFailureKind {
+    param([AllowNull()][object]$ErrorRecord)
+
+    $message = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        [string]$ErrorRecord.Exception.Message
+    }
+    else {
+        [string]$ErrorRecord
+    }
+
+    if ($message -match '1440|24\s*hours|frequency|already\s+been\s+created|cannot\s+be\s+created.*past') {
+        return 'DailyThrottle'
+    }
+    if ($message -match 'not\s+supported|unsupported|disabled|System\s+Restore|restore\s+point.*not.*enabled') {
+        return 'Unsupported'
+    }
+
+    return 'Failed'
+}
+
+function New-WURestorePointOutcome {
+    param(
+        [bool]$SelectiveMode,
+        [string]$Description = 'WURepair - Before Windows Update Reset',
+        [string]$SkipReason = ''
+    )
+
+    $requestedAt = Get-Date
+    $systemDrive = if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }
+    $drive = if ($systemDrive.EndsWith('\')) { $systemDrive } else { "$systemDrive\" }
+    $outcome = [ordered]@{
+        SchemaVersion    = '1.0'
+        Status           = 'Skipped'
+        Description      = $Description
+        RestorePointType = 'MODIFY_SETTINGS'
+        Drive            = $drive
+        RequestedAt      = $requestedAt.ToString('o')
+        CompletedAt      = $null
+        Attempted        = $false
+        Skipped          = $true
+        Succeeded        = $false
+        SkipReason       = $null
+        ErrorKind        = $null
+        ErrorMessage     = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SkipReason) -and $SelectiveMode) {
+        $SkipReason = 'TargetedMode'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SkipReason)) {
+        $outcome.SkipReason = $SkipReason
+        Write-Log "Skipping system restore point: $SkipReason" -Level INFO
+        return [PSCustomObject]$outcome
+    }
+
+    Write-Log ""
+    Write-Log "Creating system restore point..."
+    $outcome.Attempted = $true
+    $outcome.Skipped = $false
+    $outcome.SkipReason = $null
+
+    try {
+        Enable-ComputerRestore -Drive $drive -ErrorAction Stop
+        Checkpoint-Computer -Description $Description -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+        $outcome.Status = 'Succeeded'
+        $outcome.Succeeded = $true
+        $outcome.CompletedAt = (Get-Date).ToString('o')
+        Write-Log "Restore point created" -Level SUCCESS
+    }
+    catch {
+        $outcome.Status = 'Failed'
+        $outcome.ErrorKind = Get-WURestorePointFailureKind -ErrorRecord $_
+        $outcome.ErrorMessage = $_.Exception.Message
+        $outcome.CompletedAt = (Get-Date).ToString('o')
+        Write-Log "Could not create restore point: $($outcome.ErrorMessage)" -Level WARNING
+    }
+
+    return [PSCustomObject]$outcome
 }
 
 function Start-WURepair {
@@ -5255,6 +5341,8 @@ function Start-WURepair {
     $startTime = Get-Date
     $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
     $effectiveJsonReport = $JsonReport
+    $restorePointDescription = 'WURepair - Before Windows Update Reset'
+    $restorePointOutcome = $null
     if (-not [string]::IsNullOrWhiteSpace($SupportBundle) -and [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
         $effectiveJsonReport = Join-Path $Script:Config.TempPath "WURepair-report_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     }
@@ -5416,7 +5504,8 @@ function Start-WURepair {
             $Script:LastRunExitCode = $Script:ExitCodes.Cancelled
             if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
                 $blockedEndTime = Get-Date
-                Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $blockedEndTime -Duration ($blockedEndTime - $startTime) -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $preReport -PostConnectivity $connectivity -PhaseResults @() -Options $reportOptions -WULogTimelineSummary $null -OverallStatus 'ReadinessBlocked' -ExitCode $Script:LastRunExitCode
+                $restorePointOutcome = New-WURestorePointOutcome -SelectiveMode $false -Description $restorePointDescription -SkipReason 'ReadinessBlocked'
+                Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $blockedEndTime -Duration ($blockedEndTime - $startTime) -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $preReport -PostConnectivity $connectivity -PhaseResults @() -Options $reportOptions -RestorePointOutcome $restorePointOutcome -WULogTimelineSummary $null -OverallStatus 'ReadinessBlocked' -ExitCode $Script:LastRunExitCode
             }
             return $Script:LastRunExitCode
         }
@@ -5458,18 +5547,7 @@ function Start-WURepair {
         return $Script:LastRunExitCode
     }
 
-    if (-not $selectiveMode) {
-        Write-Log ""
-        Write-Log "Creating system restore point..."
-        try {
-            Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
-            Checkpoint-Computer -Description "WURepair - Before Windows Update Reset" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
-            Write-Log "Restore point created" -Level SUCCESS
-        }
-        catch {
-            Write-Log "Could not create restore point (may be disabled)" -Level WARNING
-        }
-    }
+    $restorePointOutcome = New-WURestorePointOutcome -SelectiveMode $selectiveMode -Description $restorePointDescription
 
     # ── Build phase list for progress tracking ──
     $phases = @()
@@ -5633,13 +5711,13 @@ function Start-WURepair {
         $wuLogTimelineSummary = Get-WULogTimelineSummary -Timeline $wuLogTimeline
     }
 
-    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -WULogTimelineSummary $wuLogTimelineSummary -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
+    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -RestorePointOutcome $restorePointOutcome -WULogTimelineSummary $wuLogTimelineSummary -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
 
     # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
     Write-Log "Duration: $durationMin minutes"
     Write-Log "Log saved to: $($Script:Config.LogPath)"
-    $supportBundlePath = New-WUSupportBundle -Path $SupportBundle -JsonReportPath $effectiveJsonReport -ModeLabel $modeLabel -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode -PhaseResults $phaseResults -WULogTimeline $wuLogTimeline -NoRedact:$NoRedact
+    $supportBundlePath = New-WUSupportBundle -Path $SupportBundle -JsonReportPath $effectiveJsonReport -ModeLabel $modeLabel -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode -PhaseResults $phaseResults -RestorePointOutcome $restorePointOutcome -WULogTimeline $wuLogTimeline -NoRedact:$NoRedact
 
     Write-UiHeader -Title 'Repair complete' -Subtitle 'Restart is strongly recommended to finalize service, cache, and policy changes.' -Tone 'Success'
     Write-UiMetric -Label 'Duration' -Value "$durationMin minutes" -Tone 'Info'

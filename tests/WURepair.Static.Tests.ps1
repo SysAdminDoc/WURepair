@@ -132,6 +132,8 @@ Describe 'WURepair static contract' {
             'Get-DiagnosticReportDelta',
             'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
+            'Get-WURestorePointFailureKind',
+            'New-WURestorePointOutcome',
             'Get-CommandLineOptionValue'
         )
     }
@@ -216,8 +218,12 @@ Describe 'WURepair static contract' {
             'Get-DiagnosticReportDelta',
             'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
+            'Get-WURestorePointFailureKind',
+            'New-WURestorePointOutcome',
             'Get-CommandLineOptionValue',
             'Get-BitLockerVolume',
+            'Enable-ComputerRestore',
+            'Checkpoint-Computer',
             'sc.exe',
             'DISM',
             'Get-FileHash',
@@ -531,6 +537,21 @@ Describe 'WURepair static contract' {
                 DurationSeconds = 5
             }
         )
+        $restorePointOutcome = [PSCustomObject]@{
+            SchemaVersion    = '1.0'
+            Status           = 'Succeeded'
+            Description      = 'WURepair - Before Windows Update Reset'
+            RestorePointType = 'MODIFY_SETTINGS'
+            Drive            = 'C:\'
+            RequestedAt      = '2026-07-01T01:00:00.0000000Z'
+            CompletedAt      = '2026-07-01T01:00:01.0000000Z'
+            Attempted        = $true
+            Skipped          = $false
+            Succeeded        = $true
+            SkipReason       = $null
+            ErrorKind        = $null
+            ErrorMessage     = $null
+        }
         $options = @{
             Unattended             = $true
             PlainText              = $true
@@ -547,7 +568,7 @@ Describe 'WURepair static contract' {
         }
         $reportPath = Join-Path $TestDrive 'WURepair-report.json'
 
-        Write-JsonRepairReport -Path $reportPath -StartTime ([datetime]'2026-07-01T01:00:00Z') -EndTime ([datetime]'2026-07-01T01:00:05Z') -Duration ([timespan]::FromSeconds(5)) -ModeLabel 'Full repair' -SelectiveMode $false -PreReport $preReport -PostReport $postReport -PostConnectivity $true -PhaseResults $phaseResults -Options $options -WULogTimelineSummary $timelineSummary -OverallStatus 'Success' -ExitCode 0
+        Write-JsonRepairReport -Path $reportPath -StartTime ([datetime]'2026-07-01T01:00:00Z') -EndTime ([datetime]'2026-07-01T01:00:05Z') -Duration ([timespan]::FromSeconds(5)) -ModeLabel 'Full repair' -SelectiveMode $false -PreReport $preReport -PostReport $postReport -PostConnectivity $true -PhaseResults $phaseResults -Options $options -RestorePointOutcome $restorePointOutcome -WULogTimelineSummary $timelineSummary -OverallStatus 'Success' -ExitCode 0
 
         $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
         $requiredFields = @(
@@ -566,6 +587,7 @@ Describe 'WURepair static contract' {
             'MutationJournalPath',
             'MutationJournal',
             'CatalogPackageValidation',
+            'RestorePoint',
             'WindowsUpdateLogTimeline',
             'PostRepairConnectivity',
             'PhaseResults',
@@ -582,6 +604,9 @@ Describe 'WURepair static contract' {
         $report.Options.Unattended | Should -BeTrue
         $report.Options.OverrideReadinessBlock | Should -BeFalse
         $report.Options.RepairReadiness.Status | Should -Be 'Blocked'
+        $report.RestorePoint.Status | Should -Be 'Succeeded'
+        $report.RestorePoint.Attempted | Should -BeTrue
+        $report.RestorePoint.Description | Should -Be 'WURepair - Before Windows Update Reset'
         $report.PreRepair.RepairReadiness.BlockingReasons | Should -Contain 'PendingReboot'
         $report.PreRepair.RepairReadiness.BitLocker.ProtectionStatus | Should -Be 'On'
         $report.PostRepair.RepairReadiness.Status | Should -Be 'Ready'
@@ -629,6 +654,84 @@ Describe 'WURepair static contract' {
         }
     }
 
+    It 'records restore point outcomes for success failure and skip paths' {
+        function global:Enable-ComputerRestore {
+            [CmdletBinding()]
+            param([string]$Drive)
+
+            $script:RestorePointCalls += [PSCustomObject]@{ Command = 'Enable'; Drive = $Drive }
+        }
+
+        function global:Checkpoint-Computer {
+            [CmdletBinding()]
+            param(
+                [string]$Description,
+                [string]$RestorePointType
+            )
+
+            $script:RestorePointCalls += [PSCustomObject]@{ Command = 'Checkpoint'; Description = $Description; RestorePointType = $RestorePointType }
+        }
+
+        try {
+            $script:RestorePointCalls = @()
+            $selective = New-WURestorePointOutcome -SelectiveMode $true
+            $selective.Status | Should -Be 'Skipped'
+            $selective.Attempted | Should -BeFalse
+            $selective.SkipReason | Should -Be 'TargetedMode'
+
+            $success = New-WURestorePointOutcome -SelectiveMode $false -Description 'WURepair test restore'
+            $success.Status | Should -Be 'Succeeded'
+            $success.Attempted | Should -BeTrue
+            $success.Succeeded | Should -BeTrue
+            $success.Description | Should -Be 'WURepair test restore'
+            @($script:RestorePointCalls.Command) | Should -Contain 'Enable'
+            @($script:RestorePointCalls.Command) | Should -Contain 'Checkpoint'
+
+            function global:Checkpoint-Computer {
+                [CmdletBinding()]
+                param(
+                    [string]$Description,
+                    [string]$RestorePointType
+                )
+
+                throw 'A new system restore point cannot be created because one has already been created within the past 1440 minutes.'
+            }
+
+            $dailyThrottle = New-WURestorePointOutcome -SelectiveMode $false
+            $dailyThrottle.Status | Should -Be 'Failed'
+            $dailyThrottle.Attempted | Should -BeTrue
+            $dailyThrottle.ErrorKind | Should -Be 'DailyThrottle'
+            $dailyThrottle.ErrorMessage | Should -Match '1440'
+
+            function global:Enable-ComputerRestore {
+                [CmdletBinding()]
+                param([string]$Drive)
+
+                throw 'System Restore is not supported on this platform.'
+            }
+
+            function global:Checkpoint-Computer {
+                [CmdletBinding()]
+                param(
+                    [string]$Description,
+                    [string]$RestorePointType
+                )
+
+                throw 'Checkpoint should not run when ComputerRestore enablement fails.'
+            }
+
+            $unsupported = New-WURestorePointOutcome -SelectiveMode $false
+            $unsupported.Status | Should -Be 'Failed'
+            $unsupported.ErrorKind | Should -Be 'Unsupported'
+            $unsupported.ErrorMessage | Should -Match 'not supported'
+        }
+        finally {
+            Remove-Item -LiteralPath 'Function:\Enable-ComputerRestore' -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath 'Function:\Checkpoint-Computer' -Force -ErrorAction SilentlyContinue
+            $script:RestorePointCalls = @()
+        }
+    }
+
     It 'creates a redacted support bundle zip with manifest and core artifacts' {
         $originalUserName = $env:USERNAME
         $originalUserProfile = $env:USERPROFILE
@@ -658,7 +761,22 @@ Describe 'WURepair static contract' {
                     Line       = 42
                 }
             )
-            $result = New-WUSupportBundle -Path $bundlePath -JsonReportPath $jsonPath -ModeLabel 'Test' -OverallStatus 'Success' -ExitCode 0 -PhaseResults @() -WULogTimeline $timeline
+            $restorePointOutcome = [PSCustomObject]@{
+                SchemaVersion    = '1.0'
+                Status           = 'Failed'
+                Description      = 'WURepair - Before Windows Update Reset'
+                RestorePointType = 'MODIFY_SETTINGS'
+                Drive            = 'C:\'
+                RequestedAt      = '2026-07-01T01:00:00.0000000Z'
+                CompletedAt      = '2026-07-01T01:00:01.0000000Z'
+                Attempted        = $true
+                Skipped          = $false
+                Succeeded        = $false
+                SkipReason       = $null
+                ErrorKind        = 'DailyThrottle'
+                ErrorMessage     = 'A new system restore point cannot be created within the past 1440 minutes.'
+            }
+            $result = New-WUSupportBundle -Path $bundlePath -JsonReportPath $jsonPath -ModeLabel 'Test' -OverallStatus 'Success' -ExitCode 0 -PhaseResults @() -RestorePointOutcome $restorePointOutcome -WULogTimeline $timeline
 
             Test-Path -LiteralPath $result | Should -BeTrue
             Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -697,6 +815,8 @@ Describe 'WURepair static contract' {
                 $manifest.Tool | Should -Be 'WURepair'
                 $manifest.Version | Should -Be '9.9.9-test'
                 $manifest.Redaction | Should -Be 'Enabled'
+                $manifest.RestorePoint.Status | Should -Be 'Failed'
+                $manifest.RestorePoint.ErrorKind | Should -Be 'DailyThrottle'
                 $manifest.ComputerName | Should -Not -Match 'DESKTOP-TEST'
                 $manifest.UserName | Should -Not -Match 'Alice'
                 $manifestRelativePaths = @($manifest.Files.RelativePath | ForEach-Object { [string]$_ -replace '\\', '/' })

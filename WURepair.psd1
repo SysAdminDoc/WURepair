@@ -1,6 +1,6 @@
 @{
     RootModule        = 'WURepair.psm1'
-    ModuleVersion     = '2.26.0'
+    ModuleVersion     = '2.27.0'
     GUID              = '4d2cbad8-1eb2-4a0d-8b94-ccb86fb723ce'
     Author            = 'SysAdminDoc'
     CompanyName       = 'SysAdminDoc'
@@ -35,7 +35,7 @@
             Tags         = @('WindowsUpdate', 'Repair', 'Diagnostics', 'RMM', 'Intune', 'WSUS', 'DISM')
             LicenseUri   = 'https://github.com/SysAdminDoc/WURepair/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/SysAdminDoc/WURepair'
-            ReleaseNotes = 'Adds repair-readiness gating for pending reboot and BitLocker risk.'
+            ReleaseNotes = 'Records system restore-point outcomes in JSON reports and support-bundle manifests.'
         }
     }
 }

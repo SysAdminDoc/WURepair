@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.26.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.27.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -86,7 +86,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-Windows Update Repair Tool v2.26.0
+Windows Update Repair Tool v2.27.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -371,7 +371,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.26.0 Flow                      │
+│                      WURepair v2.27.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -406,7 +406,7 @@ To preview or apply journal rollback:
 - ✅ **No external downloads by default** - `-StageSSU` and `-RepairServicingStack` are opt-in update download paths; `-DismSource` can keep RestoreHealth on local media
 - ✅ **Open source** - Full source code available for review
 - ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
-- ✅ **Restore point** - System restore point created automatically
+- ✅ **Restore point reporting** - Full repair attempts a system restore point and records success, skip, throttle, or failure details in JSON and support bundles
 - ✅ **Readiness checks** - JSON reports include pending-reboot and system-drive BitLocker status; unattended runs stop on pending-reboot readiness blocks unless `-OverrideReadinessBlock` is supplied
 - ✅ **Detailed logging** - Full audit trail saved to Desktop
 - ✅ **Redacted support bundles** - `-SupportBundle` redacts usernames, device names, profile paths, SIDs, and structured Windows Update log timeline messages unless `-NoRedact` is supplied
@@ -420,6 +420,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.27.0
+
+- JSON reports and support-bundle manifests now record system restore-point attempted/skipped/succeeded/failed outcomes, including failure kind and error detail.
 
 ### v2.26.0
 
