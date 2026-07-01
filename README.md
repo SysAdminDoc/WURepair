@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.30.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.31.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -317,6 +317,33 @@ The tool removes blocks for these Microsoft domains (and more):
 | `msiserver` (Windows Installer) | Manual |
 | `TrustedInstaller` (Modules Installer) | Manual |
 
+## Intune Proactive Remediation
+
+Deploy WURepair as an Intune proactive remediation to automatically detect and fix Windows Update issues across managed devices.
+
+### Setup
+
+1. Deploy `WURepair.ps1` to managed devices at `%ProgramData%\WURepair\WURepair.ps1`
+2. In Intune, create a new Proactive Remediation:
+   - **Detection script**: Upload `Intune\Detect-WURepair.ps1`
+   - **Remediation script**: Upload `Intune\Remediate-WURepair.ps1`
+   - **Run script in 64-bit PowerShell**: Yes
+   - **Run this script using the logged-on credentials**: No (run as SYSTEM)
+3. Assign to device groups and set a schedule
+
+### What the Detection Script Checks
+
+- Windows Update, BITS, and Cryptographic Services are not disabled
+- No Microsoft update domains are blocked in the hosts file
+- No blocking policies (`DisableWindowsUpdateAccess`, `NoAutoUpdate`, `SetDisableUXWUAccess`)
+- DISM component store is healthy
+- Microsoft update endpoints are reachable
+
+### Output
+
+- Detection: `Compliant` (exit 0) or `Non-compliant: N issue(s)` (exit 1)
+- Remediation: JSON report and mutation journal written to `%ProgramData%\WURepair\Reports\`
+
 ## Troubleshooting
 
 ### "Script won't run" / Execution Policy Error
@@ -379,7 +406,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.30.0 Flow                      │
+│                      WURepair v2.31.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -428,6 +455,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.31.0
+
+- Added `Intune\Detect-WURepair.ps1` detection script for Intune proactive remediations: checks service states, hosts file blocks, blocking policies, DISM health, and endpoint connectivity.
+- Added `Intune\Remediate-WURepair.ps1` remediation script: runs WURepair in unattended mode with JSON reporting and stable exit codes.
 
 ### v2.30.0
 

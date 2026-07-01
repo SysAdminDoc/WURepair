@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.31.0 adds Intune proactive remediation detection and remediation scripts.
     v2.30.0 adds WinRE and Quick Machine Recovery diagnostics.
     v2.29.0 pins and reports local validation tool versions.
     v2.28.0 adds release ZIP verification and module import smoke checks.
@@ -43,7 +44,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.30.0
+    Version: 2.31.0
 #>
 
 #Requires -RunAsAdministrator
@@ -59,7 +60,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.30.0'
+    Version                            = '2.31.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5

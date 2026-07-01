@@ -1279,6 +1279,44 @@ Describe 'WURepair static contract' {
         $localChecks | Should -Match 'Install-Module -Name PSScriptAnalyzer'
     }
 
+    It 'provides Intune proactive remediation detection and remediation scripts' {
+        $intuneDir = Join-Path $script:RepoRoot 'Intune'
+        Test-Path -LiteralPath $intuneDir | Should -BeTrue
+
+        $detectPath = Join-Path $intuneDir 'Detect-WURepair.ps1'
+        $remediatePath = Join-Path $intuneDir 'Remediate-WURepair.ps1'
+        Test-Path -LiteralPath $detectPath | Should -BeTrue
+        Test-Path -LiteralPath $remediatePath | Should -BeTrue
+
+        $detectTokens = $null
+        $detectErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($detectPath, [ref]$detectTokens, [ref]$detectErrors) | Out-Null
+        $detectErrors.Count | Should -Be 0
+
+        $remediateTokens = $null
+        $remediateErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($remediatePath, [ref]$remediateTokens, [ref]$remediateErrors) | Out-Null
+        $remediateErrors.Count | Should -Be 0
+
+        $detectContent = Get-Content -LiteralPath $detectPath -Raw
+        $remediateContent = Get-Content -LiteralPath $remediatePath -Raw
+
+        $detectContent | Should -Match 'exit 0'
+        $detectContent | Should -Match 'exit 1'
+        $detectContent | Should -Match 'Compliant'
+        $detectContent | Should -Match 'Non-compliant'
+        $detectContent | Should -Match 'wuauserv'
+        $detectContent | Should -Match 'DisableWindowsUpdateAccess'
+        $detectContent | Should -Match 'DISM'
+
+        $remediateContent | Should -Match 'exit 0'
+        $remediateContent | Should -Match 'exit 1'
+        $remediateContent | Should -Match '-Unattended'
+        $remediateContent | Should -Match '-PlainText'
+        $remediateContent | Should -Match '-JsonReport'
+        $remediateContent | Should -Match 'WURepair\.ps1'
+    }
+
     It 'validates module manifest metadata and exported wrappers' {
         $manifestPath = Join-Path $script:RepoRoot 'WURepair.psd1'
         Test-Path -LiteralPath $manifestPath | Should -BeTrue
