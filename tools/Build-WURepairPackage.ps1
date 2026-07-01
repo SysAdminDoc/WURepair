@@ -148,8 +148,8 @@ function New-WURepairArtifact {
     }
 
     $signing = Sign-PackageScripts -Root $artifactRoot -Certificate $Certificate -TimestampServer $TimestampServer -RequireSignature:$RequireSignature
-    $catalog = New-PackageFileCatalog -Root $artifactRoot
     $checksums = Write-PackageChecksums -Root $artifactRoot
+    $catalog = New-PackageFileCatalog -Root $artifactRoot
 
     $zipPath = Join-Path $OutputRoot ("{0}-v{1}.zip" -f $Name, $version)
     if (Test-Path -LiteralPath $zipPath) {
@@ -215,6 +215,10 @@ try {
     }
     $receiptPath = Join-Path $outputRoot ("WURepair-release-v{0}.json" -f $version)
     Set-Content -LiteralPath $receiptPath -Value ($receipt | ConvertTo-Json -Depth 8) -Encoding UTF8 -Force
+
+    $verification = & (Join-Path $PSScriptRoot 'Test-WURepairPackage.ps1') -PackageRoot $outputRoot -Version $version -RequireValidSignature:$RequireSignature
+    $receipt['PackageVerification'] = $verification
+    Set-Content -LiteralPath $receiptPath -Value ($receipt | ConvertTo-Json -Depth 10) -Encoding UTF8 -Force
 
     $receipt
 }

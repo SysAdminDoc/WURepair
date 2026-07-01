@@ -2,6 +2,16 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.29.0] - 2026-07-01
+
+- Local validation now prints detected Pester and PSScriptAnalyzer versions and enforces tested minimums with actionable install/update guidance.
+- Added `-ListToolVersions` switch to `Invoke-LocalChecks.ps1` for no-network version diagnostics.
+
+## [v2.28.0] - 2026-07-01
+
+- Added `tools\Test-WURepairPackage.ps1` to verify release ZIP checksums, optional file catalogs, Authenticode status, release receipt parity, and extracted module import.
+- Build packaging now runs the verifier and records `PackageVerification` in the release receipt.
+
 ## [v2.27.0] - 2026-07-01
 
 - JSON reports now include a top-level `RestorePoint` outcome with attempted/skipped/succeeded/failed state, timestamps, failure kind, and error detail.

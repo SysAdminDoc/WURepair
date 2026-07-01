@@ -782,7 +782,7 @@ Describe 'WURepair static contract' {
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             $zip = [System.IO.Compression.ZipFile]::OpenRead($result)
             try {
-                $entryNames = @($zip.Entries | Select-Object -ExpandProperty FullName)
+                $entryNames = @($zip.Entries | Select-Object -ExpandProperty FullName | ForEach-Object { [string]$_ -replace '\\', '/' })
                 $entryNames | Should -Contain 'manifest.json'
                 $entryNames | Should -Contain 'WURepair.log'
                 $entryNames | Should -Contain 'WURepair-report.json'
@@ -1229,7 +1229,21 @@ Describe 'WURepair static contract' {
         $localChecks | Should -Match 'CodeCoverage\.OutputPath'
         $localChecks | Should -Match 'CoveragePercentTarget\s*=\s*0'
         $localChecks | Should -Match '\[string\]\$CoverageOutputPath'
+        $localChecks | Should -Match '\[string\]\$PackageRoot'
+        $localChecks | Should -Match '\[switch\]\$SkipPackageVerification'
         $localChecks | Should -Not -Match 'FullNameFilter'
+    }
+
+    It 'pins and reports local validation tool versions' {
+        $localChecksPath = Join-Path $script:RepoRoot 'Invoke-LocalChecks.ps1'
+        $localChecks = Get-Content -LiteralPath $localChecksPath -Raw
+
+        $localChecks | Should -Match '\[switch\]\$ListToolVersions'
+        $localChecks | Should -Match 'MinPesterVersion'
+        $localChecks | Should -Match 'MinAnalyzerVersion'
+        $localChecks | Should -Match 'Get-WURepairToolVersions'
+        $localChecks | Should -Match 'Install-Module -Name Pester'
+        $localChecks | Should -Match 'Install-Module -Name PSScriptAnalyzer'
     }
 
     It 'validates module manifest metadata and exported wrappers' {
@@ -1248,14 +1262,24 @@ Describe 'WURepair static contract' {
 
     It 'wires release packaging to local checks signing catalogs and checksums' {
         $packageScriptPath = Join-Path $script:RepoRoot 'tools\Build-WURepairPackage.ps1'
+        $verifierScriptPath = Join-Path $script:RepoRoot 'tools\Test-WURepairPackage.ps1'
         Test-Path -LiteralPath $packageScriptPath | Should -BeTrue
+        Test-Path -LiteralPath $verifierScriptPath | Should -BeTrue
 
         $packageScript = Get-Content -LiteralPath $packageScriptPath -Raw
+        $verifierScript = Get-Content -LiteralPath $verifierScriptPath -Raw
         $packageScript | Should -Match 'Invoke-LocalChecks\.ps1'
         $packageScript | Should -Match 'Set-AuthenticodeSignature'
         $packageScript | Should -Match 'New-FileCatalog'
         $packageScript | Should -Match 'SHA256SUMS\.txt'
         $packageScript | Should -Match 'WURepair-release-v'
         $packageScript | Should -Match 'WURepair-module'
+        $packageScript | Should -Match 'Test-WURepairPackage\.ps1'
+        $packageScript | Should -Match 'PackageVerification'
+        $verifierScript | Should -Match 'Expand-Archive'
+        $verifierScript | Should -Match 'Test-FileCatalog'
+        $verifierScript | Should -Match 'Get-AuthenticodeSignature'
+        $verifierScript | Should -Match 'Import-Module'
+        $verifierScript | Should -Match 'SHA256SUMS\.txt'
     }
 }
