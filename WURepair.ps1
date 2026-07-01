@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.30.0 adds WinRE and Quick Machine Recovery diagnostics.
     v2.29.0 pins and reports local validation tool versions.
     v2.28.0 adds release ZIP verification and module import smoke checks.
     v2.27.0 records system restore-point outcomes in reports and support bundles.
@@ -42,7 +43,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.29.0
+    Version: 2.30.0
 #>
 
 #Requires -RunAsAdministrator
@@ -58,7 +59,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.29.0'
+    Version                            = '2.30.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -2025,6 +2026,95 @@ function Resolve-WUUrlDiagnostic {
     }
 }
 
+function Get-WinREDiagnostic {
+    $result = [ordered]@{
+        WinREEnabled      = 'Unknown'
+        WinRELocation     = 'Unknown'
+        WinREVersion      = 'Unknown'
+        WinREStatus       = 'Unknown'
+        ReagentcAvailable = $false
+        ReagentcOutput    = $null
+        ReagentcError     = $null
+        QMRPolicyStatus   = 'Not configured'
+        QMRPolicyEnabled  = $null
+    }
+
+    try {
+        $reagentcCmd = Get-Command -Name 'reagentc.exe' -ErrorAction SilentlyContinue
+        if (-not $reagentcCmd) {
+            $result.WinREStatus = 'reagentc.exe not found'
+            return [PSCustomObject]$result
+        }
+
+        $result.ReagentcAvailable = $true
+        $output = & reagentc.exe /info 2>&1
+        $outputText = ($output | Out-String).Trim()
+        $result.ReagentcOutput = $outputText
+
+        if ($outputText -match 'Windows RE status:\s*(Enabled|Disabled)') {
+            $result.WinREEnabled = $Matches[1]
+        }
+        elseif ($outputText -match 'Windows RE.*:\s*(Enabled|Disabled)') {
+            $result.WinREEnabled = $Matches[1]
+        }
+
+        if ($outputText -match 'Windows RE location:\s*(.+)') {
+            $location = $Matches[1].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($location)) {
+                $result.WinRELocation = $location
+            }
+        }
+
+        if ($outputText -match 'Recovery Image Version:\s*(.+)') {
+            $result.WinREVersion = $Matches[1].Trim()
+        }
+        elseif ($outputText -match 'BCD Id:\s*(\{[0-9a-fA-F-]+\})') {
+            $result.WinREVersion = "BCD $($Matches[1])"
+        }
+
+        $result.WinREStatus = if ($result.WinREEnabled -eq 'Enabled') {
+            'Healthy'
+        }
+        elseif ($result.WinREEnabled -eq 'Disabled') {
+            'Disabled'
+        }
+        else {
+            'Unknown'
+        }
+    }
+    catch {
+        $result.ReagentcError = $_.Exception.Message
+        $result.WinREStatus = "Error: $($_.Exception.Message)"
+    }
+
+    try {
+        $qmrPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+        $cloudRepairKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Orchestrator\UScheduler_Oobe\CloudRepair'
+        $qmrEnabled = $null
+
+        if (Test-Path -LiteralPath $qmrPolicyPath) {
+            $qmrGP = Get-ItemProperty -LiteralPath $qmrPolicyPath -Name 'SetAllowCFROnQuickMachineRecovery' -ErrorAction SilentlyContinue
+            if ($null -ne $qmrGP -and $null -ne $qmrGP.SetAllowCFROnQuickMachineRecovery) {
+                $qmrEnabled = [int]$qmrGP.SetAllowCFROnQuickMachineRecovery -eq 1
+            }
+        }
+
+        if ($null -eq $qmrEnabled -and (Test-Path -LiteralPath $cloudRepairKey)) {
+            $qmrEnabled = $true
+        }
+
+        if ($null -ne $qmrEnabled) {
+            $result.QMRPolicyEnabled = $qmrEnabled
+            $result.QMRPolicyStatus = if ($qmrEnabled) { 'Enabled' } else { 'Disabled' }
+        }
+    }
+    catch {
+        $result.QMRPolicyStatus = "Error: $($_.Exception.Message)"
+    }
+
+    return [PSCustomObject]$result
+}
+
 function Get-WSUSPostureDiagnostic {
     $wuPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
     $auPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
@@ -2331,10 +2421,12 @@ function Get-DiagnosticReport {
     $deliveryOptimization = Get-DeliveryOptimizationDiagnostic
     $updateHealthTools = Get-UpdateHealthToolDiagnostic
     $wsusPosture = Get-WSUSPostureDiagnostic
+    $winREDiagnostic = Get-WinREDiagnostic
     $report['WaaSMedic'] = $waaSMedic
     $report['DeliveryOptimization'] = $deliveryOptimization
     $report['UpdateHealthTools'] = $updateHealthTools
     $report['WSUSPosture'] = $wsusPosture
+    $report['WinRE'] = $winREDiagnostic
     $report['WaaSMedicStatus'] = $waaSMedic.ServiceStatus
     $report['DeliveryOptimizationPeerCache'] = $deliveryOptimization.PeerCacheHealth
     $report['DeliveryOptimizationMode'] = $deliveryOptimization.DownloadMode
@@ -2512,6 +2604,13 @@ function Get-DiagnosticReport {
         Write-UiMetric -Label 'WSUS issue' -Value $wsusIssue -Tone 'Warning'
     }
 
+    Write-UiSubheading -Title 'Windows Recovery Environment'
+    Write-UiMetric -Label 'WinRE status' -Value $report['WinRE'].WinREStatus -Tone $(switch ($report['WinRE'].WinREStatus) { 'Healthy' { 'Success' } 'Disabled' { 'Warning' } default { 'Error' } })
+    Write-UiMetric -Label 'WinRE enabled' -Value $report['WinRE'].WinREEnabled -Tone $(if ($report['WinRE'].WinREEnabled -eq 'Enabled') { 'Success' } elseif ($report['WinRE'].WinREEnabled -eq 'Disabled') { 'Warning' } else { 'Info' })
+    Write-UiMetric -Label 'WinRE location' -Value $report['WinRE'].WinRELocation -Tone 'Info'
+    Write-UiMetric -Label 'WinRE version' -Value $report['WinRE'].WinREVersion -Tone 'Info'
+    Write-UiMetric -Label 'Quick Machine Recovery' -Value $report['WinRE'].QMRPolicyStatus -Tone $(if ($report['WinRE'].QMRPolicyStatus -eq 'Enabled') { 'Success' } elseif ($report['WinRE'].QMRPolicyStatus -eq 'Not configured') { 'Info' } else { 'Warning' })
+
     Write-UiSubheading -Title 'Repair signals'
     $infoRows = @(
         @{ Label = 'SoftwareDistribution'; Value = $report['SoftwareDistribution'] },
@@ -2616,6 +2715,11 @@ function Get-DiagnosticReport {
     foreach ($wsusIssue in $report['WSUSPosture'].Issues) {
         Write-Log "WSUS/SUP Issue: $wsusIssue" -Level WARNING
     }
+    Write-Log "WinRE Status: $($report['WinRE'].WinREStatus)"
+    Write-Log "WinRE Enabled: $($report['WinRE'].WinREEnabled)"
+    Write-Log "WinRE Location: $($report['WinRE'].WinRELocation)"
+    Write-Log "WinRE Version: $($report['WinRE'].WinREVersion)"
+    Write-Log "Quick Machine Recovery: $($report['WinRE'].QMRPolicyStatus)"
     Write-Log "SoftwareDistribution: $($report['SoftwareDistribution'])"
     Write-Log "catroot2: $($report['Catroot2'])"
     Write-Log "DISM Health: $($report['DISMHealth'])"

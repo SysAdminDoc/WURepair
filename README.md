@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.29.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.30.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -63,6 +63,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
 - **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
 - **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, policy-driven update-source settings, and managed-source guardrail status
+- **WinRE & Quick Machine Recovery**: Reports WinRE enabled/disabled state, recovery partition path, image version, and Quick Machine Recovery policy status
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
@@ -378,7 +379,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.29.0 Flow                      │
+│                      WURepair v2.30.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -427,6 +428,11 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.30.0
+
+- Added WinRE diagnostics: reports Windows Recovery Environment enabled/disabled state, recovery partition path, and image version via `reagentc /info`.
+- Added Quick Machine Recovery policy detection from Group Policy and Update Orchestrator registry keys.
 
 ### v2.29.0
 
