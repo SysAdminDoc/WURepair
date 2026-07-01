@@ -6,6 +6,13 @@ Describe 'WURepair static contract' {
         $script:Tokens = $null
         $script:ParseErrors = $null
         $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$script:Tokens, [ref]$script:ParseErrors)
+        $script:ModulePath = Join-Path $script:RepoRoot 'WURepair.psm1'
+        $script:ModuleContent = Get-Content -LiteralPath $script:ModulePath -Raw
+        $script:ModuleTokens = $null
+        $script:ModuleParseErrors = $null
+        $script:ModuleAst = [System.Management.Automation.Language.Parser]::ParseFile($script:ModulePath, [ref]$script:ModuleTokens, [ref]$script:ModuleParseErrors)
+        $script:ReadmePath = Join-Path $script:RepoRoot 'README.md'
+        $script:ReadmeContent = Get-Content -LiteralPath $script:ReadmePath -Raw
 
         function Import-WURepairFunction {
             param([string[]]$Name)
@@ -23,6 +30,47 @@ Describe 'WURepair static contract' {
                 $definition = $functionAst.Extent.Text -replace '^function\s+([^\s{]+)', 'function global:$1'
                 . ([scriptblock]::Create($definition))
             }
+        }
+
+        function Get-WURepairFunctionAst {
+            param(
+                [System.Management.Automation.Language.Ast]$Ast,
+                [string]$Name
+            )
+
+            $functionAst = $Ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+            }, $true)
+
+            if (-not $functionAst) {
+                throw "Function not found: $Name"
+            }
+
+            return $functionAst
+        }
+
+        function Get-WURepairFunctionParameterInfo {
+            param(
+                [System.Management.Automation.Language.Ast]$Ast,
+                [string]$Name
+            )
+
+            $functionAst = Get-WURepairFunctionAst -Ast $Ast -Name $Name
+            return @($functionAst.Body.ParamBlock.Parameters | ForEach-Object {
+                [PSCustomObject]@{
+                    Name = $_.Name.VariablePath.UserPath
+                    Type = $_.StaticType.Name
+                }
+            })
+        }
+
+        function Get-WURepairReadmeOptionNames {
+            param([string]$Content)
+
+            return @([regex]::Matches($Content, '\|\s*`(?<Option>-[A-Za-z]+)(?:\s+<[^`]+>)?`\s*\|') | ForEach-Object {
+                $_.Groups['Option'].Value
+            } | Select-Object -Unique)
         }
 
         Import-WURepairFunction -Name @(
@@ -734,6 +782,60 @@ Describe 'WURepair static contract' {
         Get-CommandLineOptionValue -Arguments $arguments -Name '-SupportBundle' | Should -Be 'C:\Temp\support.zip'
         Get-CommandLineOptionValue -Arguments $arguments -Name '-DismSource' | Should -Be 'D:\sources\install.wim'
         { Get-CommandLineOptionValue -Arguments @('-JsonReport') -Name '-JsonReport' } | Should -Throw '*requires a path value*'
+    }
+
+    It 'keeps public options aligned across script module help CLI and README surfaces' {
+        $script:ModuleParseErrors.Count | Should -Be 0
+        $startOptions = @(Get-WURepairFunctionParameterInfo -Ast $script:Ast -Name 'Start-WURepair')
+        $moduleOptions = @(Get-WURepairFunctionParameterInfo -Ast $script:ModuleAst -Name 'Invoke-WURepair')
+        $moduleOptionNames = @($moduleOptions | Select-Object -ExpandProperty Name)
+        $moduleHelpText = (Get-WURepairFunctionAst -Ast $script:Ast -Name 'Show-Help').Extent.Text
+        $moduleForwardingText = (Get-WURepairFunctionAst -Ast $script:ModuleAst -Name 'Invoke-WURepair').Extent.Text
+        $readmeOptionNames = @(Get-WURepairReadmeOptionNames -Content $script:ReadmeContent)
+        $aliasContracts = @{
+            QuickMode = @{
+                ModuleParameter       = 'Quick'
+                ModuleForwardedOption = '-Quick'
+                CliOptions            = @('-QuickMode', '-Quick')
+                HelpOptions           = @('-QuickMode', '-Quick')
+                ReadmeOptions         = @('-Quick')
+            }
+        }
+
+        foreach ($option in $startOptions) {
+            $defaultOptionName = "-$($option.Name)"
+            $contract = @{
+                ModuleParameter       = $option.Name
+                ModuleForwardedOption = $defaultOptionName
+                CliOptions            = @($defaultOptionName)
+                HelpOptions           = @($defaultOptionName)
+                ReadmeOptions         = @($defaultOptionName)
+            }
+
+            if ($aliasContracts.ContainsKey($option.Name)) {
+                foreach ($key in $aliasContracts[$option.Name].Keys) {
+                    $contract[$key] = $aliasContracts[$option.Name][$key]
+                }
+            }
+
+            $moduleOptionNames | Should -Contain $contract.ModuleParameter
+            $moduleForwardedOption = [regex]::Escape($contract.ModuleForwardedOption)
+            $moduleParameterReference = '\$' + [regex]::Escape($contract.ModuleParameter)
+            if ($option.Type -eq 'SwitchParameter') {
+                $moduleForwardingText | Should -Match "Add-WURepairSwitchArgument[^\r\n]+-Name\s+'$moduleForwardedOption'[^\r\n]+-Enabled\s+\(\[bool\]$moduleParameterReference\)"
+            }
+            else {
+                $moduleForwardingText | Should -Match "Add-WURepairValueArgument[^\r\n]+-Name\s+'$moduleForwardedOption'[^\r\n]+-Value\s+$moduleParameterReference"
+            }
+
+            foreach ($cliOption in $contract.CliOptions) {
+                $script:Content | Should -Match ([regex]::Escape("'$cliOption'"))
+            }
+
+            $script:Content | Should -Match ([regex]::Escape("`$params['$($option.Name)']"))
+            @($contract.HelpOptions | Where-Object { $moduleHelpText -match ([regex]::Escape($_)) }).Count | Should -BeGreaterThan 0
+            @($contract.ReadmeOptions | Where-Object { $readmeOptionNames -contains $_ }).Count | Should -BeGreaterThan 0
+        }
     }
 
     It 'resolves repair phase selection for full targeted and quick runs' {

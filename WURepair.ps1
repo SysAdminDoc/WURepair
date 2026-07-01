@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.24.0 adds public option parity contract tests.
     v2.23.0 runs the complete Pester suite in local validation.
     v2.22.0 adds a versioned endpoint and policy knowledge manifest.
     v2.21.0 adds module metadata and local release packaging.
@@ -36,7 +37,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.23.0
+    Version: 2.24.0
 #>
 
 #Requires -RunAsAdministrator
@@ -52,7 +53,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.23.0'
+    Version                            = '2.24.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
