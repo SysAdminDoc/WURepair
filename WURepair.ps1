@@ -7,6 +7,8 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.29.0 pins and reports local validation tool versions.
+    v2.28.0 adds release ZIP verification and module import smoke checks.
     v2.27.0 records system restore-point outcomes in reports and support bundles.
     v2.26.0 adds repair-readiness gating for pending reboot and BitLocker risk.
     v2.25.0 adds JSON report and support-bundle schema fixture tests.
@@ -40,7 +42,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.27.0
+    Version: 2.29.0
 #>
 
 #Requires -RunAsAdministrator
@@ -56,7 +58,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.27.0'
+    Version                            = '2.29.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5

@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.27.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.29.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -86,7 +86,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-Windows Update Repair Tool v2.27.0
+Windows Update Repair Tool v2.28.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -129,6 +129,7 @@ Windows Update Repair Tool v2.27.0
 To build local release artifacts from source:
 ```powershell
 .\tools\Build-WURepairPackage.ps1
+.\tools\Test-WURepairPackage.ps1
 ```
 
 ## Usage
@@ -264,6 +265,11 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 This runs PowerShell parser validation, PSScriptAnalyzer, and the Pester static-contract tests before release packaging.
 
+To check tool versions without running validation:
+```powershell
+.\Invoke-LocalChecks.ps1 -ListToolVersions
+```
+
 To include an opt-in coverage report:
 ```powershell
 .\Invoke-LocalChecks.ps1 -CoverageOutputPath .\coverage\pester-coverage.xml
@@ -273,6 +279,7 @@ Local release packaging:
 ```powershell
 .\tools\Build-WURepairPackage.ps1
 .\tools\Build-WURepairPackage.ps1 -CertificateThumbprint '<thumbprint>' -RequireSignature
+.\tools\Test-WURepairPackage.ps1 -PackageRoot .\dist
 ```
 
 ## What Gets Fixed
@@ -371,7 +378,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.27.0 Flow                      │
+│                      WURepair v2.29.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -420,6 +427,15 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.29.0
+
+- Local validation now prints detected Pester and PSScriptAnalyzer versions and enforces tested minimums with actionable install/update guidance.
+- Added `-ListToolVersions` switch to `Invoke-LocalChecks.ps1` for no-network version diagnostics.
+
+### v2.28.0
+
+- Added `tools\Test-WURepairPackage.ps1` to verify release ZIP checksums, optional file catalogs, Authenticode status, release receipt parity, and extracted module import without touching installed modules.
 
 ### v2.27.0
 
