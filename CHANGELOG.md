@@ -2,6 +2,11 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.25.0] - 2026-07-01
+
+- Added generated JSON report and support-bundle manifest schema fixture tests.
+- Support-bundle `manifest.json` now includes `SchemaVersion`.
+
 ## [v2.24.0] - 2026-07-01
 
 - Added public option parity contract tests across script parameters, module wrapper forwarding, CLI parsing, help output, and README option tables.
