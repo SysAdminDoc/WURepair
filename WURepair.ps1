@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.23.0 runs the complete Pester suite in local validation.
     v2.22.0 adds a versioned endpoint and policy knowledge manifest.
     v2.21.0 adds module metadata and local release packaging.
     v2.20.0 adds structured Windows Update log timeline export.
@@ -35,7 +36,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.22.0
+    Version: 2.23.0
 #>
 
 #Requires -RunAsAdministrator
@@ -51,7 +52,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.22.0'
+    Version                            = '2.23.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
