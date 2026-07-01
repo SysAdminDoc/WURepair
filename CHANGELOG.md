@@ -2,6 +2,12 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.23.0] - 2026-07-01
+
+- Local validation now runs the complete Pester suite by default instead of hard-coded name-filtered batches.
+- Added optional Pester coverage output with `Invoke-LocalChecks.ps1 -CoverageOutputPath`.
+- Added a static regression test that fails if local checks reintroduce Pester full-name filters.
+
 ## [v2.22.0] - 2026-06-29
 
 - Added a versioned endpoint and policy knowledge manifest with Microsoft Learn source URLs.

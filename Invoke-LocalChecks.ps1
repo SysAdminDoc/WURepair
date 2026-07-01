@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipAnalyzer
+    [switch]$SkipAnalyzer,
+    [string]$CoverageOutputPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,54 +73,33 @@ foreach ($pattern in $artifactPatterns) {
 
 Import-Module Pester -MinimumVersion 5.0 -ErrorAction Stop
 $testPath = Join-Path $repoRoot 'tests'
-$testBatches = @(
-    @(
-        '*parses without*',
-        '*uses timeout*',
-        '*derives phase*',
-        '*wires unattended*',
-        '*emits plain text*',
-        '*wires mutation*',
-        '*appends mutation*',
-        '*applies file-content*'
-    ),
-    @(
-        '*normalizes HRESULT*',
-        '*reads registry*',
-        '*removes only blocking*',
-        '*waits for service*',
-        '*wraps sc.exe*',
-        '*parses Catalog*',
-        '*computes SHA256*',
-        '*validates Catalog*',
-        '*rejects Catalog*',
-        '*classifies WSUS*',
-        '*defines a sourced endpoint*',
-        '*matches regional Microsoft update hosts*',
-        '*preserves managed*',
-        '*removes managed*',
-        '*redacts support*',
-        '*creates a redacted support*',
-        '*parses DISM*',
-        '*resolves DISM repair sources*',
-        '*builds DISM RestoreHealth*',
-        '*passes DISM RestoreHealth*',
-        '*parses Windows Update log timeline*',
-        '*summarizes Windows Update log timelines*',
-        '*parses CLI option values*',
-        '*resolves repair phase selection*',
-        '*keeps release version*',
-        '*wires optional package*',
-        '*validates module manifest*',
-        '*wires release packaging*'
-    )
-)
+$pesterArgs = @{
+    Path     = $testPath
+    Output   = 'Detailed'
+    PassThru = $true
+}
 
-foreach ($batch in $testBatches) {
-    $result = Invoke-Pester -Path $testPath -Output Detailed -PassThru -FullNameFilter $batch
-    if ($result.FailedCount -gt 0) {
-        exit 1
+if ($CoverageOutputPath) {
+    $coverageDirectory = Split-Path -Parent $CoverageOutputPath
+    if ($coverageDirectory -and -not (Test-Path -LiteralPath $coverageDirectory)) {
+        New-Item -Path $coverageDirectory -ItemType Directory -Force | Out-Null
     }
+
+    $pesterConfiguration = New-PesterConfiguration
+    $pesterConfiguration.Run.Path = @($testPath)
+    $pesterConfiguration.Run.PassThru = $true
+    $pesterConfiguration.Output.Verbosity = 'None'
+    $pesterConfiguration.CodeCoverage.Enabled = $true
+    $pesterConfiguration.CodeCoverage.Path = @($scriptPath)
+    $pesterConfiguration.CodeCoverage.OutputPath = $CoverageOutputPath
+    $pesterConfiguration.CodeCoverage.CoveragePercentTarget = 0
+    $result = Invoke-Pester -Configuration $pesterConfiguration
+}
+else {
+    $result = Invoke-Pester @pesterArgs
+}
+if ($result.FailedCount -gt 0) {
+    exit 1
 }
 
 exit 0

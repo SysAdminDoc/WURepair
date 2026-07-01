@@ -790,6 +790,19 @@ Describe 'WURepair static contract' {
         $localChecks | Should -Match 'Intune'
     }
 
+    It 'runs every Pester test by default without name filters' {
+        $localChecksPath = Join-Path $script:RepoRoot 'Invoke-LocalChecks.ps1'
+        $localChecks = Get-Content -LiteralPath $localChecksPath -Raw
+
+        $localChecks | Should -Match 'Invoke-Pester @pesterArgs'
+        $localChecks | Should -Match 'New-PesterConfiguration'
+        $localChecks | Should -Match "Output\.Verbosity\s*=\s*'None'"
+        $localChecks | Should -Match 'CodeCoverage\.OutputPath'
+        $localChecks | Should -Match 'CoveragePercentTarget\s*=\s*0'
+        $localChecks | Should -Match '\[string\]\$CoverageOutputPath'
+        $localChecks | Should -Not -Match 'FullNameFilter'
+    }
+
     It 'validates module manifest metadata and exported wrappers' {
         $manifestPath = Join-Path $script:RepoRoot 'WURepair.psd1'
         Test-Path -LiteralPath $manifestPath | Should -BeTrue
