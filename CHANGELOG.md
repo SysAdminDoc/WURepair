@@ -2,6 +2,11 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.31.0] - 2026-07-01
+
+- Added `Intune\Detect-WURepair.ps1` detection script for Intune proactive remediations.
+- Added `Intune\Remediate-WURepair.ps1` remediation script with unattended JSON reporting.
+
 ## [v2.30.0] - 2026-07-01
 
 - Added WinRE diagnostics: reports Windows Recovery Environment enabled/disabled state, recovery partition path, and image version via `reagentc /info`.
