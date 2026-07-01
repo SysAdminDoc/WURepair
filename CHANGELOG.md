@@ -2,6 +2,11 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.26.0] - 2026-07-01
+
+- Added repair-readiness gating for pending reboot and system-drive BitLocker risk.
+- JSON reports now record `RepairReadiness` and `OverrideReadinessBlock` so unattended overrides are auditable.
+
 ## [v2.25.0] - 2026-07-01
 
 - Added generated JSON report and support-bundle manifest schema fixture tests.

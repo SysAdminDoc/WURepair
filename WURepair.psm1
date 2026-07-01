@@ -74,6 +74,7 @@ function Invoke-WURepair {
         [string]$RollbackJournal,
         [switch]$ApplyRollback,
         [switch]$ResetManagedUpdatePolicy,
+        [switch]$OverrideReadinessBlock,
         [switch]$NoRedact,
         [switch]$PlainText,
         [switch]$Unattended
@@ -99,6 +100,7 @@ function Invoke-WURepair {
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-DismLimitAccess' -Enabled ([bool]$DismLimitAccess)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-ApplyRollback' -Enabled ([bool]$ApplyRollback)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-ResetManagedUpdatePolicy' -Enabled ([bool]$ResetManagedUpdatePolicy)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-OverrideReadinessBlock' -Enabled ([bool]$OverrideReadinessBlock)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-NoRedact' -Enabled ([bool]$NoRedact)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-PlainText' -Enabled ([bool]$PlainText)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-Unattended' -Enabled ([bool]$Unattended)

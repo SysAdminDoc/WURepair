@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.26.0 adds repair-readiness gating for pending reboot and BitLocker risk.
     v2.25.0 adds JSON report and support-bundle schema fixture tests.
     v2.24.0 adds public option parity contract tests.
     v2.23.0 runs the complete Pester suite in local validation.
@@ -38,7 +39,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.25.0
+    Version: 2.26.0
 #>
 
 #Requires -RunAsAdministrator
@@ -54,7 +55,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.25.0'
+    Version                            = '2.26.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -2130,6 +2131,146 @@ function Get-WSUSPostureDiagnostic {
 # DIAGNOSTIC PRE-CHECK REPORT
 # ============================================================================
 
+function ConvertTo-WUBitLockerProtectionStatus {
+    param([AllowNull()][object]$ProtectionStatus)
+
+    if ($null -eq $ProtectionStatus) {
+        return 'Unknown'
+    }
+
+    $statusText = [string]$ProtectionStatus
+    switch -Regex ($statusText) {
+        '^(1|On)$' { return 'On' }
+        '^(0|Off)$' { return 'Off' }
+        default { return $statusText }
+    }
+}
+
+function Get-WUSystemDriveBitLockerStatus {
+    $mountPoint = if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }
+    $bitLockerCommand = Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue
+    if (-not $bitLockerCommand) {
+        return [PSCustomObject]@{
+            SchemaVersion        = '1.0'
+            Available            = $false
+            QuerySucceeded       = $false
+            MountPoint           = $mountPoint
+            ProtectionStatus     = 'Unavailable'
+            LockStatus           = 'Unknown'
+            VolumeStatus         = 'Unknown'
+            EncryptionPercentage = $null
+            IsProtected          = $false
+            QueryError           = 'Get-BitLockerVolume is not available.'
+            RecommendedAction    = 'If BitLocker is enabled, verify the recovery key is backed up before running repair and restarting.'
+        }
+    }
+
+    try {
+        $volume = Get-BitLockerVolume -MountPoint $mountPoint -ErrorAction Stop | Select-Object -First 1
+        if (-not $volume) {
+            throw "No BitLocker volume returned for $mountPoint."
+        }
+
+        $protectionStatus = ConvertTo-WUBitLockerProtectionStatus -ProtectionStatus $volume.ProtectionStatus
+        $isProtected = ($protectionStatus -eq 'On')
+        return [PSCustomObject]@{
+            SchemaVersion        = '1.0'
+            Available            = $true
+            QuerySucceeded       = $true
+            MountPoint           = $mountPoint
+            ProtectionStatus     = $protectionStatus
+            LockStatus           = if ($null -ne $volume.LockStatus) { [string]$volume.LockStatus } else { 'Unknown' }
+            VolumeStatus         = if ($null -ne $volume.VolumeStatus) { [string]$volume.VolumeStatus } else { 'Unknown' }
+            EncryptionPercentage = $volume.EncryptionPercentage
+            IsProtected          = $isProtected
+            QueryError           = $null
+            RecommendedAction    = if ($isProtected) { 'Verify the BitLocker recovery key is escrowed before restart-heavy repair.' } else { 'No BitLocker recovery action is required for the system drive.' }
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            SchemaVersion        = '1.0'
+            Available            = $true
+            QuerySucceeded       = $false
+            MountPoint           = $mountPoint
+            ProtectionStatus     = 'Unknown'
+            LockStatus           = 'Unknown'
+            VolumeStatus         = 'Unknown'
+            EncryptionPercentage = $null
+            IsProtected          = $false
+            QueryError           = $_.Exception.Message
+            RecommendedAction    = 'BitLocker state could not be confirmed; verify recovery-key availability before running repair and restarting.'
+        }
+    }
+}
+
+function Get-WURepairReadiness {
+    param(
+        [hashtable]$DiagnosticReport,
+        [switch]$OverrideReadinessBlock
+    )
+
+    $pendingReboot = ($DiagnosticReport -and [string]$DiagnosticReport['PendingReboot'] -eq 'Yes')
+    $bitLocker = Get-WUSystemDriveBitLockerStatus
+    $blockingReasons = New-Object System.Collections.Generic.List[string]
+    $warnings = New-Object System.Collections.Generic.List[string]
+
+    if ($pendingReboot) {
+        [void]$blockingReasons.Add('PendingReboot')
+    }
+
+    if ($bitLocker.IsProtected) {
+        [void]$warnings.Add('BitLockerProtected')
+    }
+    elseif (-not $bitLocker.QuerySucceeded) {
+        [void]$warnings.Add('BitLockerUnknown')
+    }
+
+    $requiresOverride = ($blockingReasons.Count -gt 0)
+    $canProceed = (-not $requiresOverride -or [bool]$OverrideReadinessBlock)
+    $status = if (-not $canProceed) {
+        'Blocked'
+    }
+    elseif ($requiresOverride -and $OverrideReadinessBlock) {
+        'Override'
+    }
+    elseif ($warnings.Count -gt 0) {
+        'Warning'
+    }
+    else {
+        'Ready'
+    }
+
+    $recommendedAction = if ($pendingReboot -and $bitLocker.IsProtected) {
+        'Restart once before repair when possible, and verify the BitLocker recovery key is escrowed before any repair-triggered restart.'
+    }
+    elseif ($pendingReboot) {
+        'Restart once before repair when possible, or rerun with -OverrideReadinessBlock if an unattended repair must proceed now.'
+    }
+    elseif ($bitLocker.IsProtected) {
+        $bitLocker.RecommendedAction
+    }
+    elseif (-not $bitLocker.QuerySucceeded) {
+        $bitLocker.RecommendedAction
+    }
+    else {
+        'No readiness blockers detected.'
+    }
+
+    return [PSCustomObject]@{
+        SchemaVersion      = '1.0'
+        Status             = $status
+        CanProceed         = $canProceed
+        RequiresOverride   = $requiresOverride
+        OverrideApplied    = [bool]$OverrideReadinessBlock
+        PendingReboot      = $pendingReboot
+        BlockingReasons    = @($blockingReasons.ToArray())
+        Warnings           = @($warnings.ToArray())
+        BitLocker          = $bitLocker
+        RecommendedAction  = $recommendedAction
+    }
+}
+
 function Get-DiagnosticReport {
     <#
     .SYNOPSIS
@@ -2251,6 +2392,9 @@ function Get-DiagnosticReport {
     # -- pending.xml --
     $pendingXml = "$env:SystemRoot\WinSxS\pending.xml"
     $report['PendingXml'] = if (Test-Path $pendingXml) { 'Present' } else { 'Not present' }
+
+    # -- Repair readiness --
+    $report['RepairReadiness'] = Get-WURepairReadiness -DiagnosticReport $report
 
     # -- Last successful update --
     try {
@@ -2385,6 +2529,19 @@ function Get-DiagnosticReport {
         Write-UiMetric -Label $row.Label -Value $row.Value -Tone $tone
     }
 
+    if ($report['RepairReadiness']) {
+        $readinessTone = switch ($report['RepairReadiness'].Status) {
+            'Ready' { 'Success' }
+            'Blocked' { 'Error' }
+            default { 'Warning' }
+        }
+        Write-UiMetric -Label 'Repair readiness' -Value $report['RepairReadiness'].Status -Tone $readinessTone
+        Write-UiMetric -Label 'BitLocker' -Value ("{0} ({1})" -f $report['RepairReadiness'].BitLocker.ProtectionStatus, $report['RepairReadiness'].BitLocker.LockStatus) -Tone $(if ($report['RepairReadiness'].BitLocker.IsProtected -or -not $report['RepairReadiness'].BitLocker.QuerySucceeded) { 'Warning' } else { 'Success' })
+        if ($report['RepairReadiness'].Status -ne 'Ready') {
+            Write-UiCallout -Title 'Repair readiness attention' -Tone $readinessTone -Lines @($report['RepairReadiness'].RecommendedAction)
+        }
+    }
+
     if ($report['WUErrors'].Count -gt 0) {
         Write-UiCallout -Title 'Recent Windows Update errors' -Tone 'Warning' -Lines ($report['WUErrors'] | ForEach-Object {
             "[{0}] {1}" -f $_.Time, $_.Message
@@ -2461,6 +2618,12 @@ function Get-DiagnosticReport {
     Write-Log "DISM Health: $($report['DISMHealth'])"
     Write-Log "Pending Reboot: $($report['PendingReboot'])"
     Write-Log "pending.xml: $($report['PendingXml'])"
+    if ($report['RepairReadiness']) {
+        Write-Log "Repair Readiness: $($report['RepairReadiness'].Status)"
+        Write-Log "Repair Readiness Action: $($report['RepairReadiness'].RecommendedAction)"
+        Write-Log "BitLocker Protection: $($report['RepairReadiness'].BitLocker.ProtectionStatus)"
+        Write-Log "BitLocker Query: $($report['RepairReadiness'].BitLocker.QuerySucceeded)"
+    }
     Write-Log "Last Successful Update: $($report['LastSuccessfulUpdate'])"
     if ($report['WUErrorSummary'].Count -gt 0) {
         foreach ($entry in $report['WUErrorSummary']) {
@@ -5037,6 +5200,7 @@ function Start-WURepair {
         [switch]$ApplyRollback,
         [switch]$ResetManagedUpdatePolicy,
         [switch]$DismLimitAccess,
+        [switch]$OverrideReadinessBlock,
         [switch]$NoRedact,
         [switch]$PlainText,
         [switch]$Unattended
@@ -5102,9 +5266,42 @@ function Start-WURepair {
 
     # ── Diagnostic Pre-Check Report ──
     $preReport = Get-DiagnosticReport
+    $repairReadiness = Get-WURepairReadiness -DiagnosticReport $preReport -OverrideReadinessBlock:$OverrideReadinessBlock
+    $preReport['RepairReadiness'] = $repairReadiness
 
     # Test connectivity
     $connectivity = Test-WindowsUpdateConnectivity
+
+    $reportOptions = @{
+        QuickMode                = [bool]$QuickMode
+        SkipDISM                 = [bool]$SkipDISM
+        SkipSFC                  = [bool]$SkipSFC
+        SkipBackup               = [bool]$SkipBackup
+        RepairServices           = [bool]$RepairServices
+        RepairDLLs               = [bool]$RepairDLLs
+        RepairStore              = [bool]$RepairStore
+        RepairDISM               = [bool]$RepairDISM
+        RepairSFC                = [bool]$RepairSFC
+        RepairNetwork            = [bool]$RepairNetwork
+        RepairWaaS               = [bool]$RepairWaaS
+        RepairDelivery           = [bool]$RepairDelivery
+        RepairServicingStack     = [bool]$RepairServicingStack
+        StageSSU                 = [bool]$StageSSU
+        AnalyzeLogs              = [bool]$AnalyzeLogs
+        DismSource               = $DismSource
+        DismResolvedSource       = if ($dismSourceSpec) { $dismSourceSpec.SourceArgument } else { $null }
+        DismSourceType           = if ($dismSourceSpec) { $dismSourceSpec.SourceType } else { $null }
+        DismLimitAccess          = [bool]$DismLimitAccess
+        RepairAll                = [bool]$RepairAll
+        Unattended               = [bool]$Unattended
+        PlainText                = [bool]$PlainText
+        ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
+        OverrideReadinessBlock   = [bool]$OverrideReadinessBlock
+        SupportBundle            = $SupportBundle
+        NoRedact                 = [bool]$NoRedact
+        JournalPath              = $Script:Config.JournalPath
+        RepairReadiness          = $repairReadiness
+    }
 
     $plannedSteps = @()
     if ($selectiveMode) {
@@ -5183,6 +5380,8 @@ function Start-WURepair {
     Write-UiMetric -Label 'Backups' -Value $backupMode -Tone 'Info'
     Write-UiMetric -Label 'Restore point' -Value $restorePointMode -Tone $(if ($selectiveMode) { 'Info' } else { 'Success' })
     Write-UiMetric -Label 'Connectivity' -Value $connectivityLabel -Tone $(if ($connectivity) { 'Success' } else { 'Warning' })
+    Write-UiMetric -Label 'Readiness' -Value $repairReadiness.Status -Tone $(switch ($repairReadiness.Status) { 'Ready' { 'Success' } 'Blocked' { 'Error' } default { 'Warning' } })
+    Write-UiMetric -Label 'BitLocker' -Value ("{0} ({1})" -f $repairReadiness.BitLocker.ProtectionStatus, $repairReadiness.BitLocker.LockStatus) -Tone $(if ($repairReadiness.BitLocker.IsProtected -or -not $repairReadiness.BitLocker.QuerySucceeded) { 'Warning' } else { 'Success' })
     Write-UiMetric -Label 'Log file' -Value $Script:Config.LogPath -Tone 'Info'
     if ($dismSourceSpec) {
         Write-UiMetric -Label 'DISM source' -Value $dismSourceSpec.SourceArgument -Tone 'Info'
@@ -5202,7 +5401,35 @@ function Start-WURepair {
     if ($preReport['PendingReboot'] -eq 'Yes') {
         Write-UiCallout -Title 'A reboot is already pending on this device.' -Tone 'Warning' -Lines @(
             'Windows Update can remain stuck until that restart is completed.',
-            'Continuing is still safe, but the final reboot becomes especially important.'
+            'Unattended repair will stop before destructive phases unless -OverrideReadinessBlock is supplied.'
+        )
+    }
+
+    if (-not $repairReadiness.CanProceed) {
+        Write-UiCallout -Title 'Repair readiness is blocked.' -Tone 'Error' -Lines @(
+            $repairReadiness.RecommendedAction,
+            'Interactive runs can still proceed after confirmation; unattended runs require -OverrideReadinessBlock.'
+        )
+
+        if ($Unattended) {
+            Write-Log "Repair readiness blocked unattended run: $($repairReadiness.RecommendedAction)" -Level ERROR
+            $Script:LastRunExitCode = $Script:ExitCodes.Cancelled
+            if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
+                $blockedEndTime = Get-Date
+                Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $blockedEndTime -Duration ($blockedEndTime - $startTime) -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $preReport -PostConnectivity $connectivity -PhaseResults @() -Options $reportOptions -WULogTimelineSummary $null -OverallStatus 'ReadinessBlocked' -ExitCode $Script:LastRunExitCode
+            }
+            return $Script:LastRunExitCode
+        }
+    }
+    elseif ($repairReadiness.Status -eq 'Override') {
+        Write-UiCallout -Title 'Readiness override recorded.' -Tone 'Warning' -Lines @(
+            $repairReadiness.RecommendedAction,
+            'The explicit -OverrideReadinessBlock switch will be recorded in JSON output.'
+        )
+    }
+    elseif ($repairReadiness.Warnings.Count -gt 0) {
+        Write-UiCallout -Title 'Repair readiness warning.' -Tone 'Warning' -Lines @(
+            $repairReadiness.RecommendedAction
         )
     }
 
@@ -5406,34 +5633,6 @@ function Start-WURepair {
         $wuLogTimelineSummary = Get-WULogTimelineSummary -Timeline $wuLogTimeline
     }
 
-    $reportOptions = @{
-        QuickMode             = [bool]$QuickMode
-        SkipDISM              = [bool]$SkipDISM
-        SkipSFC               = [bool]$SkipSFC
-        SkipBackup            = [bool]$SkipBackup
-        RepairServices        = [bool]$RepairServices
-        RepairDLLs            = [bool]$RepairDLLs
-        RepairStore           = [bool]$RepairStore
-        RepairDISM            = [bool]$RepairDISM
-        RepairSFC             = [bool]$RepairSFC
-        RepairNetwork         = [bool]$RepairNetwork
-        RepairWaaS            = [bool]$RepairWaaS
-        RepairDelivery        = [bool]$RepairDelivery
-        RepairServicingStack  = [bool]$RepairServicingStack
-        StageSSU              = [bool]$StageSSU
-        AnalyzeLogs           = [bool]$AnalyzeLogs
-        DismSource            = $DismSource
-        DismResolvedSource    = if ($dismSourceSpec) { $dismSourceSpec.SourceArgument } else { $null }
-        DismSourceType        = if ($dismSourceSpec) { $dismSourceSpec.SourceType } else { $null }
-        DismLimitAccess       = [bool]$DismLimitAccess
-        RepairAll             = [bool]$RepairAll
-        Unattended            = [bool]$Unattended
-        PlainText             = [bool]$PlainText
-        ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
-        SupportBundle         = $SupportBundle
-        NoRedact              = [bool]$NoRedact
-        JournalPath           = $Script:Config.JournalPath
-    }
     Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -WULogTimelineSummary $wuLogTimelineSummary -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
 
     # Summary
@@ -5506,6 +5705,7 @@ function Show-Help {
         '-RollbackJournal <path>  Preview reversible changes from a mutation journal.',
         '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
         '-ResetManagedUpdatePolicy  Remove WSUS/SUP/WUfB source policy values intentionally.',
+        '-OverrideReadinessBlock  Allow unattended repair to proceed when readiness is blocked.',
         '-NoRedact             Keep usernames, device names, paths, and SIDs in support bundles.',
         '-PlainText            Emit deterministic ASCII output and suppress progress rendering.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
@@ -5595,6 +5795,7 @@ if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
 if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
 if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePolicy'] = $true }
+if ($args -contains '-OverrideReadinessBlock') { $params['OverrideReadinessBlock'] = $true }
 if ($args -contains '-NoRedact') { $params['NoRedact'] = $true }
 if ($args -contains '-PlainText') { $params['PlainText'] = $true; $Script:Config.PlainText = $true }
 if ($args -contains '-DismLimitAccess') { $params['DismLimitAccess'] = $true }

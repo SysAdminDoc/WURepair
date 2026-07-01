@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.25.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Version-2.26.0-orange?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
 </p>
 
@@ -86,7 +86,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
     ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
     ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
     ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-    Windows Update Repair Tool v2.25.0
+Windows Update Repair Tool v2.26.0
 
 ======================================================================
   DIAGNOSTICS - Gathering System Information
@@ -162,6 +162,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-RollbackJournal <path>` | Preview reversible changes from a mutation journal |
 | `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
 | `-ResetManagedUpdatePolicy` | Remove managed WSUS/SUP/WUfB source policy values intentionally; default repair preserves them |
+| `-OverrideReadinessBlock` | Allow unattended repair to proceed when pending-reboot readiness is blocked; records the override in JSON output |
 | `-NoRedact` | Keep usernames, device names, profile paths, and SIDs in support bundles |
 | `-PlainText` | Emit deterministic ASCII output and suppress progress rendering |
 | `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
@@ -241,6 +242,9 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # RMM-safe run with no host UI and stable exit code
 .\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
+
+# RMM run that intentionally proceeds despite a pending-reboot readiness block
+.\WURepair.ps1 -Unattended -OverrideReadinessBlock -JsonReport C:\Temp\WURepair-report.json
 
 # Explicitly remove managed WSUS/SUP/WUfB source policy values
 .\WURepair.ps1 -ResetManagedUpdatePolicy
@@ -367,7 +371,7 @@ To preview or apply journal rollback:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.25.0 Flow                      │
+│                      WURepair v2.26.0 Flow                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Diagnostic Pre-Check Report (status table)                  │
 │  2. Create System Restore Point                                 │
@@ -403,6 +407,7 @@ To preview or apply journal rollback:
 - ✅ **Open source** - Full source code available for review
 - ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
 - ✅ **Restore point** - System restore point created automatically
+- ✅ **Readiness checks** - JSON reports include pending-reboot and system-drive BitLocker status; unattended runs stop on pending-reboot readiness blocks unless `-OverrideReadinessBlock` is supplied
 - ✅ **Detailed logging** - Full audit trail saved to Desktop
 - ✅ **Redacted support bundles** - `-SupportBundle` redacts usernames, device names, profile paths, SIDs, and structured Windows Update log timeline messages unless `-NoRedact` is supplied
 
@@ -415,6 +420,10 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### v2.26.0
+
+- Added repair-readiness gating that reports pending reboot and system-drive BitLocker risk before repair; unattended runs stop before destructive phases unless `-OverrideReadinessBlock` is supplied.
 
 ### v2.25.0
 
