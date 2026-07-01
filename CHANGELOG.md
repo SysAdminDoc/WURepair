@@ -2,6 +2,11 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.27.0] - 2026-07-01
+
+- JSON reports now include a top-level `RestorePoint` outcome with attempted/skipped/succeeded/failed state, timestamps, failure kind, and error detail.
+- Support-bundle `manifest.json` now includes the same restore-point outcome for escalation review.
+
 ## [v2.26.0] - 2026-07-01
 
 - Added repair-readiness gating for pending reboot and system-drive BitLocker risk.
