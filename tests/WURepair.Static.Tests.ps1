@@ -134,7 +134,8 @@ Describe 'WURepair static contract' {
             'Resolve-WURepairPhaseSelection',
             'Get-WURestorePointFailureKind',
             'New-WURestorePointOutcome',
-            'Get-CommandLineOptionValue'
+            'Get-CommandLineOptionValue',
+            'Get-WinREDiagnostic'
         )
     }
 
@@ -221,6 +222,7 @@ Describe 'WURepair static contract' {
             'Get-WURestorePointFailureKind',
             'New-WURestorePointOutcome',
             'Get-CommandLineOptionValue',
+            'Get-WinREDiagnostic',
             'Get-BitLockerVolume',
             'Enable-ComputerRestore',
             'Checkpoint-Computer',
@@ -1232,6 +1234,37 @@ Describe 'WURepair static contract' {
         $localChecks | Should -Match '\[string\]\$PackageRoot'
         $localChecks | Should -Match '\[switch\]\$SkipPackageVerification'
         $localChecks | Should -Not -Match 'FullNameFilter'
+    }
+
+    It 'probes WinRE and Quick Machine Recovery state through reagentc and registry' {
+        function global:reagentc.exe {
+            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+            @(
+                'Windows RE status:         Enabled'
+                'Windows RE location:       \\?\GLOBALROOT\device\harddisk0\partition4\Recovery\WindowsRE'
+                'Recovery Image Version:    10.0.22621.1'
+                'BCD Id:                    {12345678-1234-1234-1234-123456789abc}'
+                'Recovery Image Index:      1'
+                'Custom Image Location:     '
+                'Custom Image Index:        0'
+            )
+        }
+
+        try {
+            Mock Test-Path { $false } -ParameterFilter { $LiteralPath -match 'WindowsUpdate|Orchestrator' }
+
+            $diag = Get-WinREDiagnostic
+
+            $diag.ReagentcAvailable | Should -BeTrue
+            $diag.WinREEnabled | Should -Be 'Enabled'
+            $diag.WinREStatus | Should -Be 'Healthy'
+            $diag.WinRELocation | Should -Match 'Recovery\\WindowsRE'
+            $diag.WinREVersion | Should -Match '10\.0\.22621'
+            $diag.QMRPolicyStatus | Should -Be 'Not configured'
+        }
+        finally {
+            Remove-Item -LiteralPath 'Function:\reagentc.exe' -Force -ErrorAction SilentlyContinue
+        }
     }
 
     It 'pins and reports local validation tool versions' {

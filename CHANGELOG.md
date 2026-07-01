@@ -2,6 +2,11 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.30.0] - 2026-07-01
+
+- Added WinRE diagnostics: reports Windows Recovery Environment enabled/disabled state, recovery partition path, and image version via `reagentc /info`.
+- Added Quick Machine Recovery policy detection from Group Policy and Update Orchestrator registry keys.
+
 ## [v2.29.0] - 2026-07-01
 
 - Local validation now prints detected Pester and PSScriptAnalyzer versions and enforces tested minimums with actionable install/update guidance.
