@@ -2,6 +2,10 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [v2.24.0] - 2026-07-01
+
+- Added public option parity contract tests across script parameters, module wrapper forwarding, CLI parsing, help output, and README option tables.
+
 ## [v2.23.0] - 2026-07-01
 
 - Local validation now runs the complete Pester suite by default instead of hard-coded name-filtered batches.
