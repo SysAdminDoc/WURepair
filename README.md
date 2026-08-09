@@ -64,6 +64,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
 - **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, policy-driven update-source settings, and managed-source guardrail status
 - **WinRE & Quick Machine Recovery**: Reports WinRE enabled/disabled state, recovery partition path, image version, and Quick Machine Recovery policy status
+- **Safe Mode Diagnostics**: Detects normal, Minimal, Network, and Directory Services Repair Safe Mode sessions; `-InSafeMode` enables deeper locked-file cache cleanup
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
@@ -71,6 +72,7 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **Support Bundle**: Optional `-SupportBundle <path>` writes a redacted zip with WURepair logs, JSON report, Windows Update log, event exports, and CBS/DISM tails
 - **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
 - **Plain Text Output**: Optional `-PlainText` emits deterministic ASCII status lines for RMM consoles, screen readers, and log capture
+- **Repair Preview**: `-WhatIf` shows the diagnostics-backed repair plan and can write a preview JSON report without running mutation phases
 - **Mutation Journal & Rollback**: Writes a per-run JSON journal of hosts, registry, policy, and cache mutations; `-RollbackJournal` previews/apply reversible changes
 - **Module & Release Packaging**: `WURepair.psd1` / `WURepair.psm1` expose phase wrappers, and `tools\Build-WURepairPackage.ps1` builds script and module ZIPs with SHA256 receipts plus optional file catalogs/signing
 - **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
@@ -157,6 +159,7 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
 | `-DismSource <path>` | Use mounted Windows media, `install.wim`, or `install.esd` as the DISM `RestoreHealth` repair source |
 | `-DismLimitAccess` | Prevent DISM from using Windows Update as a repair source |
+| `-ResetPolicies` | Reset blocking Windows Update policies as a targeted phase while preserving managed source policy by default |
 | `-AnalyzeLogs` | Export a structured Windows Update log timeline and compact JSON summary |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
 | `-SupportBundle <path>` | Create a redacted zip with WURepair log, JSON report, WindowsUpdate.log, relevant events, and CBS/DISM tails |
@@ -167,6 +170,8 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-OverrideReadinessBlock` | Allow unattended repair to proceed when pending-reboot readiness is blocked; records the override in JSON output |
 | `-NoRedact` | Keep usernames, device names, profile paths, and SIDs in support bundles |
 | `-PlainText` | Emit deterministic ASCII output and suppress progress rendering |
+| `-WhatIf` | Preview diagnostics and planned phases without making system changes |
+| `-InSafeMode` | Confirm the current session is Safe Mode and enable deeper locked-file cache cleanup |
 | `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
 | `-Help` | Display help information |
 
@@ -185,6 +190,7 @@ Run individual repair phases instead of the full pipeline:
 | `-RepairWaaS` | Only reset Update Orchestrator services and USO tasks |
 | `-RepairDelivery` | Only reset Delivery Optimization cache and download mode |
 | `-RepairServicingStack` | Only download and install a matching Microsoft Update Catalog SSU package |
+| `-ResetPolicies` | Only remove blocking Windows Update policy values; managed sources remain protected unless explicitly overridden |
 | `-RepairAll` | Run all phases (default when no switch given) |
 
 Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
@@ -226,6 +232,12 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Run DISM with a mounted ISO/WIM/ESD source and no Windows Update fallback
 .\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess
+
+# Preview a targeted policy reset without changing the machine
+.\WURepair.ps1 -ResetPolicies -WhatIf -JsonReport C:\Temp\WURepair-preview.json
+
+# Run cache repair from Safe Mode with deeper locked-file cleanup
+.\WURepair.ps1 -RepairStore -InSafeMode
 
 # Export a structured Windows Update log timeline into JSON reporting
 .\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json
@@ -455,6 +467,12 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 3. Open an issue with the log and description
 
 ## Changelog
+
+### Unreleased
+
+- Added `-WhatIf` read-only repair previews with optional JSON plan output.
+- Added targeted `-ResetPolicies` repair while preserving managed update-source policies by default.
+- Added Safe Mode diagnostics and explicit `-InSafeMode` locked-file cache cleanup.
 
 ### v2.31.0
 

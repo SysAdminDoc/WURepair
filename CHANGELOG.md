@@ -2,6 +2,12 @@
 
 All notable changes to WURepair will be documented in this file.
 
+## [Unreleased]
+
+- Added `-WhatIf` read-only repair previews with optional JSON plan output.
+- Added targeted `-ResetPolicies` repair while preserving managed update-source policies by default.
+- Added Safe Mode diagnostics and explicit `-InSafeMode` locked-file cache cleanup.
+
 ## [v2.31.0] - 2026-07-01
 
 - Added `Intune\Detect-WURepair.ps1` detection script for Intune proactive remediations.

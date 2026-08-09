@@ -129,6 +129,7 @@ Describe 'WURepair static contract' {
             'ConvertTo-WUBitLockerProtectionStatus',
             'Get-WUSystemDriveBitLockerStatus',
             'Get-WURepairReadiness',
+            'Get-WUSafeModeStatus',
             'Get-DiagnosticReportDelta',
             'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
@@ -216,6 +217,7 @@ Describe 'WURepair static contract' {
             'ConvertTo-WUBitLockerProtectionStatus',
             'Get-WUSystemDriveBitLockerStatus',
             'Get-WURepairReadiness',
+            'Get-WUSafeModeStatus',
             'Get-DiagnosticReportDelta',
             'Write-JsonRepairReport',
             'Resolve-WURepairPhaseSelection',
@@ -619,6 +621,35 @@ Describe 'WURepair static contract' {
         $report.PhaseResults[0].Name | Should -Be 'Reset WU Services'
         $report.Delta.ServiceChanges[0].Component | Should -Be 'Windows Update'
         $report.Delta.ChangedFields.Key | Should -Contain 'PendingReboot'
+    }
+
+    It 'marks preview reports as plan-only and preserves the requested steps' {
+        $Script:Config.Version = '9.9.9-preview'
+        $Script:Config.LogPath = Join-Path $TestDrive 'preview.log'
+        $Script:Config.JournalPath = Join-Path $TestDrive 'preview-journal.json'
+        $Script:MutationJournal = $null
+        $options = @{ WhatIf = $true; PlanOnly = $true }
+        $reportPath = Join-Path $TestDrive 'preview-report.json'
+
+        Write-JsonRepairReport -Path $reportPath -StartTime (Get-Date) -EndTime (Get-Date) -Duration ([timespan]::FromSeconds(1)) -ModeLabel 'Targeted repair' -SelectiveMode $true -PreReport @{ PendingReboot = 'No' } -PostReport @{ PendingReboot = 'No' } -PostConnectivity $true -PhaseResults @() -Options $options -RestorePointOutcome $null -WULogTimelineSummary $null -OverallStatus 'Preview' -ExitCode 0 -PlannedSteps @('Reset blocking Windows Update policy values.')
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+        $report.PreviewOnly | Should -BeTrue
+        $report.OverallStatus | Should -Be 'Preview'
+        $report.PlannedSteps | Should -Contain 'Reset blocking Windows Update policy values.'
+        $report.Options.WhatIf | Should -BeTrue
+    }
+
+    It 'detects Safe Mode variants through the SafeBoot option registry value' {
+        Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Option' }
+        Mock Get-ItemProperty { [PSCustomObject]@{ OptionValue = 2 } } -ParameterFilter { $LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Option' }
+
+        $status = Get-WUSafeModeStatus
+
+        $status.IsSafeMode | Should -BeTrue
+        $status.Mode | Should -Be 'Network'
+        $status.OptionValue | Should -Be 2
+        $status.Status | Should -Match 'Safe Mode'
     }
 
     It 'builds repair readiness from pending reboot and BitLocker state' {
@@ -1181,6 +1212,11 @@ Describe 'WURepair static contract' {
         $targeted.RepairDLLs | Should -BeTrue
         $targeted.RepairServices | Should -BeFalse
         $targeted.RepairDISM | Should -BeFalse
+
+        $policyOnly = Resolve-WURepairPhaseSelection -ResetPolicies
+        $policyOnly.SelectiveMode | Should -BeTrue
+        $policyOnly.ResetPolicies | Should -BeTrue
+        $policyOnly.RepairStore | Should -BeFalse
 
         $quick = Resolve-WURepairPhaseSelection -QuickMode
         $quick.SelectiveMode | Should -BeFalse
