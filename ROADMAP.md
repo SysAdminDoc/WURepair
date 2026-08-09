@@ -13,9 +13,6 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 ### Packaging
 
 ## Competitive Research
-- **Reset Windows Update Tool (wureset.com)** — 18-choice menu is the closest analogue; WURepair already wins on LTSC/IoT detection, but should copy the discrete "reset policies" menu item.
-- **Tweaking.com Windows Repair** — adds permission repair + Safe-Mode re-run prompts; consider an `-InSafeMode` detection path that unlocks deeper file unlocks.
-- **Update Fixer (winupdatefixer.com)** — markets itself as a precision tool; mirror its "what's wrong / what we'll do" preview before executing, gated behind a `-WhatIf`-style dry run.
 - **WuMgr / Windows Update MiniTool** — selective KB install/block would turn WURepair into patch management; keep only a one-shot `-ListPending` that surfaces available updates post-repair.
 
 ## Nice-to-Haves
@@ -49,5 +46,4 @@ Forward-looking scope for the Windows Update repair tool. Everything below is te
 - Transcript logging (`Start-Transcript`) with a timestamped folder per run for support escalation
 - Exit-code discipline: each phase returns a distinct code so orchestrators can branch
 - Idempotency: each action checks current state before mutating, safe to re-run
-
 

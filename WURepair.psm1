@@ -64,6 +64,7 @@ function Invoke-WURepair {
         [switch]$RepairWaaS,
         [switch]$RepairDelivery,
         [switch]$RepairServicingStack,
+        [switch]$ResetPolicies,
         [switch]$RepairAll,
         [switch]$AnalyzeLogs,
         [string]$DismSource,
@@ -77,7 +78,9 @@ function Invoke-WURepair {
         [switch]$OverrideReadinessBlock,
         [switch]$NoRedact,
         [switch]$PlainText,
-        [switch]$Unattended
+        [switch]$Unattended,
+        [switch]$WhatIf,
+        [switch]$InSafeMode
     )
 
     $arguments = New-Object 'System.Collections.Generic.List[string]'
@@ -95,6 +98,7 @@ function Invoke-WURepair {
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-RepairWaaS' -Enabled ([bool]$RepairWaaS)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-RepairDelivery' -Enabled ([bool]$RepairDelivery)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-RepairServicingStack' -Enabled ([bool]$RepairServicingStack)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-ResetPolicies' -Enabled ([bool]$ResetPolicies)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-RepairAll' -Enabled ([bool]$RepairAll)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-AnalyzeLogs' -Enabled ([bool]$AnalyzeLogs)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-DismLimitAccess' -Enabled ([bool]$DismLimitAccess)
@@ -104,6 +108,8 @@ function Invoke-WURepair {
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-NoRedact' -Enabled ([bool]$NoRedact)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-PlainText' -Enabled ([bool]$PlainText)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-Unattended' -Enabled ([bool]$Unattended)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-WhatIf' -Enabled ([bool]$WhatIf)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-InSafeMode' -Enabled ([bool]$InSafeMode)
 
     Add-WURepairValueArgument -Arguments $arguments -Name '-DismSource' -Value $DismSource
     Add-WURepairValueArgument -Arguments $arguments -Name '-JsonReport' -Value $JsonReport
@@ -123,7 +129,9 @@ function Invoke-WURepairPhase {
         [string]$JsonReport,
         [string]$SupportBundle,
         [switch]$AnalyzeLogs,
-        [switch]$NoRedact
+        [switch]$NoRedact,
+        [switch]$WhatIf,
+        [switch]$InSafeMode
     )
 
     $parameters = @{
@@ -131,6 +139,8 @@ function Invoke-WURepairPhase {
         PlainText = [bool]$PlainText
         AnalyzeLogs = [bool]$AnalyzeLogs
         NoRedact = [bool]$NoRedact
+        WhatIf = [bool]$WhatIf
+        InSafeMode = [bool]$InSafeMode
     }
     if (-not [string]::IsNullOrWhiteSpace($JsonReport)) { $parameters.JsonReport = $JsonReport }
     if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $parameters.SupportBundle = $SupportBundle }

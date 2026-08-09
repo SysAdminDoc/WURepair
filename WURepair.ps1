@@ -66,6 +66,8 @@ $Script:Config = @{
     CatalogMaxCandidates               = 5
     Unattended                         = $false
     PlainText                          = $false
+    WhatIf                             = $false
+    InSafeMode                         = $false
     JournalPath                        = "$env:USERPROFILE\Desktop\WURepair_Journal_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     Ui                                 = @{
         AccentColor   = 'Cyan'
@@ -1133,6 +1135,61 @@ function Get-ServiceStatus {
     catch {
         return $null
     }
+}
+
+function Get-WUSafeModeStatus {
+    $result = [ordered]@{
+        IsSafeMode       = $false
+        Mode             = 'Normal'
+        DetectionSource  = 'Registry'
+        RegistryPath     = 'HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Option'
+        OptionValue      = $null
+        EnvironmentValue = $null
+        Status           = 'Normal Windows session'
+    }
+
+    try {
+        $optionPath = $result.RegistryPath
+        if (Test-Path -LiteralPath $optionPath) {
+            $option = Get-ItemProperty -LiteralPath $optionPath -Name 'OptionValue' -ErrorAction SilentlyContinue
+            if ($null -ne $option -and $null -ne $option.OptionValue) {
+                $result.OptionValue = [int]$option.OptionValue
+                switch ([int]$option.OptionValue) {
+                    1 { $result.Mode = 'Minimal' }
+                    2 { $result.Mode = 'Network' }
+                    3 { $result.Mode = 'DirectoryServicesRepair' }
+                    default { $result.Mode = "Safe Mode ($($option.OptionValue))" }
+                }
+                $result.IsSafeMode = $true
+            }
+        }
+    }
+    catch {
+        $result.DetectionSource = 'RegistryError'
+    }
+
+    try {
+        $environmentValue = [Environment]::GetEnvironmentVariable('SAFEBOOT_OPTION', 'Process')
+        if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+            $result.EnvironmentValue = $environmentValue
+            if (-not $result.IsSafeMode) {
+                $result.IsSafeMode = $true
+                $result.Mode = [string]$environmentValue
+                $result.DetectionSource = 'Environment'
+            }
+        }
+    }
+    catch {
+        if ($result.DetectionSource -eq 'Registry') {
+            $result.DetectionSource = 'RegistryOnly'
+        }
+    }
+
+    if ($result.IsSafeMode) {
+        $result.Status = "Safe Mode ($($result.Mode))"
+    }
+
+    return [PSCustomObject]$result
 }
 
 # ============================================================================
@@ -2438,6 +2495,11 @@ function Get-DiagnosticReport {
     $report['UseWUServer'] = $wsusPosture.UseWUServer
     $report['DualScanPolicy'] = $wsusPosture.DualScanPolicy
 
+    # -- Safe Mode state --
+    $safeMode = Get-WUSafeModeStatus
+    $report['SafeMode'] = $safeMode
+    $report['SafeModeStatus'] = $safeMode.Status
+
     # -- SoftwareDistribution folder --
     $sdPath = "$env:SystemRoot\SoftwareDistribution"
     if (Test-Path $sdPath) {
@@ -2557,6 +2619,7 @@ function Get-DiagnosticReport {
     Write-UiMetric -Label 'Windows' -Value $report['OSSummary']
     Write-UiMetric -Label 'System drive' -Value $report['SystemDrive'] -Tone $(if ($report['FreeSpaceGB'] -ne $null -and $report['FreeSpaceGB'] -lt 10) { 'Warning' } else { 'Info' })
     Write-UiMetric -Label 'Hosts file' -Value $report['HostsStatus'] -Tone (Get-StatusTone $report['HostsStatus'])
+    Write-UiMetric -Label 'Boot mode' -Value $report['SafeModeStatus'] -Tone $(if ($report['SafeMode'].IsSafeMode) { 'Warning' } else { 'Success' })
     if ($report['IsLTSC']) {
         Write-UiMetric -Label 'Edition note' -Value 'LTSC / IoT detected - only security updates may be offered.' -Tone 'Warning'
     }
@@ -2721,6 +2784,7 @@ function Get-DiagnosticReport {
     Write-Log "WinRE Location: $($report['WinRE'].WinRELocation)"
     Write-Log "WinRE Version: $($report['WinRE'].WinREVersion)"
     Write-Log "Quick Machine Recovery: $($report['WinRE'].QMRPolicyStatus)"
+    Write-Log "Boot mode: $($report['SafeModeStatus'])"
     Write-Log "SoftwareDistribution: $($report['SoftwareDistribution'])"
     Write-Log "catroot2: $($report['Catroot2'])"
     Write-Log "DISM Health: $($report['DISMHealth'])"
@@ -3406,6 +3470,8 @@ function Backup-WUFolders {
 }
 
 function Clear-WUCache {
+    param([switch]$InSafeMode)
+
     Write-Log "CACHE - Clearing Windows Update Cache" -Level SECTION
 
     foreach ($folder in $Script:WUFolders) {
@@ -3413,6 +3479,17 @@ function Clear-WUCache {
             Write-Log "Clearing $folder..."
             $before = Get-WUPathSnapshot -Path $folder
             try {
+                if ($InSafeMode) {
+                    Write-Log "Safe Mode cleanup enabled; taking ownership of locked update-store files." -Level INFO
+                    $takeown = Get-Command -Name 'takeown.exe' -ErrorAction SilentlyContinue
+                    $icacls = Get-Command -Name 'icacls.exe' -ErrorAction SilentlyContinue
+                    if ($takeown) {
+                        & $takeown.Source /f $folder /a /r /d Y 2>&1 | Out-Null
+                    }
+                    if ($icacls) {
+                        & $icacls.Source $folder /grant '*S-1-5-32-544:F' /t /c /q 2>&1 | Out-Null
+                    }
+                }
                 Remove-Item -Path "$folder\*" -Recurse -Force -ErrorAction Stop
                 Add-WUMutationJournalEntry -Category 'Cache' -Action 'ClearUpdateStoreContents' -Target $folder -Before $before -After (Get-WUPathSnapshot -Path $folder) -RollbackType 'None' -RollbackData $null -Succeeded $true -Notes 'Contents removed without a restorable folder backup in this step.'
                 Write-Log "$folder cleared" -Level SUCCESS
@@ -3453,8 +3530,17 @@ function Clear-WUCache {
             $pendingBackup = Join-Path $Script:Config.BackupPath "pending.xml.$(Get-Date -Format 'yyyyMMdd_HHmmss').bak"
             Copy-Item -LiteralPath $pendingXml -Destination $pendingBackup -Force -ErrorAction SilentlyContinue
             $beforePending = Get-WUPathSnapshot -Path $pendingXml
-            takeown /f $pendingXml /a 2>&1 | Out-Null
-            icacls $pendingXml /grant Administrators:F 2>&1 | Out-Null
+            if ($InSafeMode) {
+                Write-Log 'Safe Mode cleanup enabled; taking ownership of pending.xml.' -Level INFO
+            }
+            $takeown = Get-Command -Name 'takeown.exe' -ErrorAction SilentlyContinue
+            $icacls = Get-Command -Name 'icacls.exe' -ErrorAction SilentlyContinue
+            if ($takeown) {
+                & $takeown.Source /f $pendingXml /a 2>&1 | Out-Null
+            }
+            if ($icacls) {
+                & $icacls.Source $pendingXml /grant '*S-1-5-32-544:F' /c /q 2>&1 | Out-Null
+            }
             Remove-Item -Path $pendingXml -Force -ErrorAction Stop
             Add-WUMutationJournalEntry -Category 'Cache' -Action 'RemovePendingXml' -Target $pendingXml -Before $beforePending -After (Get-WUPathSnapshot -Path $pendingXml) -RollbackType $(if (Test-Path -LiteralPath $pendingBackup) { 'RestoreFileFromBackup' } else { 'None' }) -RollbackData @{ OriginalPath = $pendingXml; BackupPath = $pendingBackup } -Succeeded $true
             Write-Log "pending.xml removed" -Level SUCCESS
@@ -4903,7 +4989,8 @@ function Write-JsonRepairReport {
         [object]$RestorePointOutcome,
         [object]$WULogTimelineSummary,
         [string]$OverallStatus,
-        [int]$ExitCode
+        [int]$ExitCode,
+        [object[]]$PlannedSteps = @()
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -4928,6 +5015,8 @@ function Write-JsonRepairReport {
             SelectiveMode          = $SelectiveMode
             OverallStatus          = $OverallStatus
             ExitCode               = $ExitCode
+            PreviewOnly            = [bool]($Options['WhatIf'])
+            PlannedSteps           = @($PlannedSteps)
             Options                = $Options
             LogPath                = $Script:Config.LogPath
             MutationJournalPath    = $Script:Config.JournalPath
@@ -5253,10 +5342,11 @@ function Resolve-WURepairPhaseSelection {
         [switch]$RepairWaaS,
         [switch]$RepairDelivery,
         [switch]$RepairServicingStack,
+        [switch]$ResetPolicies,
         [switch]$RepairAll
     )
 
-    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack)
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack -or $ResetPolicies)
     if ($RepairAll -or (-not $selectiveMode)) {
         $RepairServices = $true
         $RepairDLLs     = $true
@@ -5266,6 +5356,7 @@ function Resolve-WURepairPhaseSelection {
         $RepairNetwork  = $true
         $RepairWaaS     = $true
         $RepairDelivery = $true
+        $ResetPolicies  = $false
         $selectiveMode  = $false
     }
 
@@ -5283,6 +5374,7 @@ function Resolve-WURepairPhaseSelection {
         RepairWaaS          = [bool]$RepairWaaS
         RepairDelivery      = [bool]$RepairDelivery
         RepairServicingStack = [bool]$RepairServicingStack
+        ResetPolicies       = [bool]$ResetPolicies
     }
 }
 
@@ -5382,6 +5474,7 @@ function Start-WURepair {
         [switch]$RepairWaaS,
         [switch]$RepairDelivery,
         [switch]$RepairServicingStack,
+        [switch]$ResetPolicies,
         [switch]$StageSSU,
         [switch]$RepairAll,
         [switch]$AnalyzeLogs,
@@ -5396,11 +5489,15 @@ function Start-WURepair {
         [switch]$OverrideReadinessBlock,
         [switch]$NoRedact,
         [switch]$PlainText,
-        [switch]$Unattended
+        [switch]$Unattended,
+        [switch]$WhatIf,
+        [switch]$InSafeMode
     )
 
     $Script:Config.Unattended = [bool]$Unattended
     $Script:Config.PlainText = [bool]$PlainText
+    $Script:Config.WhatIf = [bool]$WhatIf
+    $Script:Config.InSafeMode = [bool]$InSafeMode
     Show-Banner
 
     if (-not (Test-AdminRights)) {
@@ -5410,7 +5507,29 @@ function Start-WURepair {
         return $Script:LastRunExitCode
     }
 
-    $phaseSelection = Resolve-WURepairPhaseSelection -SkipDISM:$SkipDISM -SkipSFC:$SkipSFC -QuickMode:$QuickMode -RepairServices:$RepairServices -RepairDLLs:$RepairDLLs -RepairStore:$RepairStore -RepairDISM:$RepairDISM -RepairSFC:$RepairSFC -RepairNetwork:$RepairNetwork -RepairWaaS:$RepairWaaS -RepairDelivery:$RepairDelivery -RepairServicingStack:$RepairServicingStack -RepairAll:$RepairAll
+    $safeModeStatus = Get-WUSafeModeStatus
+    if ($InSafeMode -and -not $safeModeStatus.IsSafeMode) {
+        Write-Log '-InSafeMode was supplied, but the current Windows session is not Safe Mode.' -Level ERROR
+        $Script:LastRunExitCode = $Script:ExitCodes.PhaseErrors
+        return $Script:LastRunExitCode
+    }
+    if ($safeModeStatus.IsSafeMode) {
+        Write-Log "Safe Mode detected: $($safeModeStatus.Mode)." -Level WARNING
+        if ($InSafeMode) {
+            Write-Log 'Safe Mode cleanup path enabled for locked update-store files.' -Level INFO
+        }
+        else {
+            Write-Log 'Use -InSafeMode to enable the deeper locked-file cleanup path.' -Level WARNING
+        }
+    }
+
+    if ($WhatIf -and -not [string]::IsNullOrWhiteSpace($RollbackJournal)) {
+        Write-Log '-WhatIf cannot be combined with -RollbackJournal because rollback applies mutations.' -Level ERROR
+        $Script:LastRunExitCode = $Script:ExitCodes.PhaseErrors
+        return $Script:LastRunExitCode
+    }
+
+    $phaseSelection = Resolve-WURepairPhaseSelection -SkipDISM:$SkipDISM -SkipSFC:$SkipSFC -QuickMode:$QuickMode -RepairServices:$RepairServices -RepairDLLs:$RepairDLLs -RepairStore:$RepairStore -RepairDISM:$RepairDISM -RepairSFC:$RepairSFC -RepairNetwork:$RepairNetwork -RepairWaaS:$RepairWaaS -RepairDelivery:$RepairDelivery -RepairServicingStack:$RepairServicingStack -ResetPolicies:$ResetPolicies -RepairAll:$RepairAll
     $selectiveMode        = $phaseSelection.SelectiveMode
     $RepairServices       = $phaseSelection.RepairServices
     $RepairDLLs           = $phaseSelection.RepairDLLs
@@ -5421,6 +5540,7 @@ function Start-WURepair {
     $RepairWaaS           = $phaseSelection.RepairWaaS
     $RepairDelivery       = $phaseSelection.RepairDelivery
     $RepairServicingStack = $phaseSelection.RepairServicingStack
+    $ResetPolicies        = $phaseSelection.ResetPolicies
 
     $dismSourceSpec = $null
     if ($RepairDISM -and -not [string]::IsNullOrWhiteSpace($DismSource)) {
@@ -5434,8 +5554,11 @@ function Start-WURepair {
         }
     }
 
-    # Initialize event log source
-    Initialize-EventSource
+    # Initialize event log source only for a mutating run. WhatIf must not create
+    # an event source or a mutation journal before the preview is emitted.
+    if (-not $WhatIf) {
+        Initialize-EventSource
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($RollbackJournal)) {
         $rollbackSuccess = Invoke-WUMutationRollback -Path $RollbackJournal -Apply:$ApplyRollback
@@ -5443,7 +5566,9 @@ function Start-WURepair {
         return $Script:LastRunExitCode
     }
 
-    Initialize-WUMutationJournal -Path $JournalPath
+    if (-not $WhatIf) {
+        Initialize-WUMutationJournal -Path $JournalPath
+    }
 
     $startTime = Get-Date
     $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
@@ -5457,7 +5582,9 @@ function Start-WURepair {
     Write-Log "Log file: $($Script:Config.LogPath)"
     Write-Log "Mutation journal: $($Script:Config.JournalPath)"
 
-    Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $modeLabel" -EventId 1000
+    if (-not $WhatIf) {
+        Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $modeLabel" -EventId 1000
+    }
 
     # ── Diagnostic Pre-Check Report ──
     $preReport = Get-DiagnosticReport
@@ -5481,6 +5608,7 @@ function Start-WURepair {
         RepairWaaS               = [bool]$RepairWaaS
         RepairDelivery           = [bool]$RepairDelivery
         RepairServicingStack     = [bool]$RepairServicingStack
+        ResetPolicies            = [bool]$ResetPolicies
         StageSSU                 = [bool]$StageSSU
         AnalyzeLogs              = [bool]$AnalyzeLogs
         DismSource               = $DismSource
@@ -5490,6 +5618,10 @@ function Start-WURepair {
         RepairAll                = [bool]$RepairAll
         Unattended               = [bool]$Unattended
         PlainText                = [bool]$PlainText
+        WhatIf                   = [bool]$WhatIf
+        InSafeMode               = [bool]$InSafeMode
+        DetectedSafeMode         = [bool]$safeModeStatus.IsSafeMode
+        SafeMode                 = $safeModeStatus
         ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
         OverrideReadinessBlock   = [bool]$OverrideReadinessBlock
         SupportBundle            = $SupportBundle
@@ -5529,6 +5661,7 @@ function Start-WURepair {
         if ($RepairWaaS) { $plannedSteps += 'Reset Update Orchestrator services and re-enable USO scheduled tasks.' }
         if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
+        if ($ResetPolicies) { $plannedSteps += 'Remove blocking Windows Update policy values while preserving managed WSUS/SUP/WUfB source policy by default.' }
         if ($AnalyzeLogs) { $plannedSteps += 'Export a structured Windows Update log timeline.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
         if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
@@ -5553,6 +5686,7 @@ function Start-WURepair {
         if ($RepairDISM -and $DismLimitAccess) { $plannedSteps += 'Run DISM with /LimitAccess so Windows Update is not used as a repair source.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
         if ($RepairSFC) { $plannedSteps += 'Run System File Checker to validate and repair protected files.' }
+        if ($ResetPolicies) { $plannedSteps += 'Reset blocking Windows Update policies while preserving managed update-source values by default.' }
         if ($AnalyzeLogs) { $plannedSteps += 'Export a structured Windows Update log timeline.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
         if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
@@ -5592,6 +5726,19 @@ function Start-WURepair {
     }
 
     Write-UiList -Title 'Planned work' -Items $plannedSteps
+
+    if ($WhatIf) {
+        $reportOptions['WhatIf'] = $true
+        $reportOptions['PlanOnly'] = $true
+        Write-UiCallout -Title 'Preview only - no system changes will be made.' -Tone 'Info' -Lines @(
+            'Diagnostics, plan generation, and requested report artifacts are read-only for this run.',
+            'Run without -WhatIf when you are ready to execute the listed phases.'
+        )
+        $previewEndTime = Get-Date
+        Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $previewEndTime -Duration ($previewEndTime - $startTime) -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $preReport -PostConnectivity $connectivity -PhaseResults @() -Options $reportOptions -RestorePointOutcome $null -WULogTimelineSummary $null -OverallStatus 'Preview' -ExitCode $Script:ExitCodes.Success -PlannedSteps $plannedSteps
+        $Script:LastRunExitCode = $Script:ExitCodes.Success
+        return $Script:LastRunExitCode
+    }
 
     if ($preReport['PendingReboot'] -eq 'Yes') {
         Write-UiCallout -Title 'A reboot is already pending on this device.' -Tone 'Warning' -Lines @(
@@ -5669,11 +5816,14 @@ function Start-WURepair {
         $phases += @{ Name = 'Stop WU Services';           Action = { Stop-WUServices } }
         $phases += @{ Name = 'Reset Service Config';       Action = { Reset-WUServiceConfig } }
     }
+    if ($ResetPolicies) {
+        $phases += @{ Name = 'Reset Blocking Policies';    Action = { Repair-UpdatePolicies -ResetManagedUpdatePolicy:$ResetManagedUpdatePolicy } }
+    }
     if ($RepairStore) {
         if (-not $SkipBackup -and $Script:Config.CreateBackup) {
             $phases += @{ Name = 'Backup WU Folders';      Action = { Backup-WUFolders } }
         }
-        $phases += @{ Name = 'Clear WU Cache';             Action = { Clear-WUCache } }
+        $phases += @{ Name = 'Clear WU Cache';             Action = { Clear-WUCache -InSafeMode:$InSafeMode } }
         $phases += @{ Name = 'Reset WU Registry';          Action = { Reset-WURegistry } }
         $phases += @{ Name = 'Reset WU Agent';             Action = { Reset-WindowsUpdateAgent } }
     }
@@ -5883,6 +6033,7 @@ function Show-Help {
         '-StageSSU             Download/install an applicable Servicing Stack Update before DISM.',
         '-DismSource <path>    Use mounted Windows media, install.wim, or install.esd for RestoreHealth.',
         '-DismLimitAccess      Prevent DISM from using Windows Update as a repair source.',
+        '-ResetPolicies        Reset blocking Windows Update policies as a targeted phase.',
         '-AnalyzeLogs          Export a structured Windows Update log timeline.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
         '-SupportBundle <path> Create a redacted zip with logs, events, JSON, and CBS/DISM tails.',
@@ -5893,6 +6044,8 @@ function Show-Help {
         '-OverrideReadinessBlock  Allow unattended repair to proceed when readiness is blocked.',
         '-NoRedact             Keep usernames, device names, paths, and SIDs in support bundles.',
         '-PlainText            Emit deterministic ASCII output and suppress progress rendering.',
+        '-WhatIf               Preview diagnostics and planned phases without system changes.',
+        '-InSafeMode           Confirm Safe Mode and enable deeper locked-file cache cleanup.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
         '-Help                 Show this help screen.'
     )
@@ -5907,6 +6060,7 @@ function Show-Help {
         '-RepairWaaS      Reset Update Orchestrator services and USO tasks.',
         '-RepairDelivery  Reset Delivery Optimization cache and download mode.',
         '-RepairServicingStack  Download/install matching Catalog SSU package.',
+        '-ResetPolicies   Remove blocking Windows Update policy values.',
         '-RepairAll       Force the full repair flow.'
     )
 
@@ -5918,6 +6072,8 @@ function Show-Help {
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess',
         '.\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -ResetPolicies -WhatIf',
+        '.\WURepair.ps1 -RepairStore -InSafeMode',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip',
         '.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json',
@@ -5976,6 +6132,7 @@ if ($args -contains '-RepairNetwork') { $params['RepairNetwork'] = $true }
 if ($args -contains '-RepairWaaS') { $params['RepairWaaS'] = $true }
 if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
 if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] = $true }
+if ($args -contains '-ResetPolicies' -or $args -contains '-RepairPolicies') { $params['ResetPolicies'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
 if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
 if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
@@ -5985,6 +6142,8 @@ if ($args -contains '-NoRedact') { $params['NoRedact'] = $true }
 if ($args -contains '-PlainText') { $params['PlainText'] = $true; $Script:Config.PlainText = $true }
 if ($args -contains '-DismLimitAccess') { $params['DismLimitAccess'] = $true }
 if ($args -contains '-AnalyzeLogs') { $params['AnalyzeLogs'] = $true }
+if ($args -contains '-WhatIf') { $params['WhatIf'] = $true }
+if ($args -contains '-InSafeMode') { $params['InSafeMode'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
