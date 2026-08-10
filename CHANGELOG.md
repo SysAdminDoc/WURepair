@@ -7,6 +7,9 @@ All notable changes to WURepair will be documented in this file.
 - Added `-WhatIf` read-only repair previews with optional JSON plan output.
 - Added targeted `-ResetPolicies` repair while preserving managed update-source policies by default.
 - Added Safe Mode diagnostics and explicit `-InSafeMode` locked-file cache cleanup.
+- Added WUA-backed `-ListPending` visibility and optional post-repair pending-update reporting.
+- Added `-ResetWSUSClient` for managed WSUS client identity reset and re-registration.
+- Added `-HtmlReport` with per-phase status and pending-update tables.
 
 ## [v2.31.0] - 2026-07-01
 
@@ -171,3 +174,58 @@ All notable changes to WURepair will be documented in this file.
 - Added: Add project icon to README
 - v2.1.0 - Diagnostic pre-check, selective repair, progress tracking, event log
 - Initial commit - WURepair
+
+## Roadmap archive — 2026-08-10 — ROADMAP.md
+
+<details>
+<summary>Original roadmap snapshot</summary>
+
+```markdown
+# WURepair Roadmap
+
+Forward-looking scope for the Windows Update repair tool. Everything below is tentative — issues and PRs welcome.
+
+## Planned Features
+
+### Diagnostics
+
+### Repair Engines
+
+### Reporting
+
+### Packaging
+
+## Competitive Research
+
+## Nice-to-Haves
+- WinRE offline repair mode: stage the script to an ISO/USB for running against an offline Windows volume via DISM `/Image:`.
+- GUI wrapper (WPF, matches the rest of the SysAdminDoc stack) that surfaces each phase as a toggle with live progress.
+- Integration with Windows Event Forwarding so enterprise SOC pipelines can subscribe to `WURepair` events.
+- Self-update check against GitHub Releases when run with `-CheckForUpdates`.
+- Hash-verified DLL re-registration: skip `regsvr32` when the DLL's Authenticode hash matches the expected catalog entry.
+
+## Open-Source Research (Round 2)
+
+### Related OSS Projects
+- https://github.com/ManuelGil/Script-Reset-Windows-Update-Tool — ResetWUEng.cmd reference, full component reset
+- https://github.com/ManuelGil/Reset-Windows-Update-Tool — original C++ Dev-C++ edition
+- https://github.com/wureset-tools/script-wureset — actively maintained fork, MIT
+- https://github.com/iamtraction/fix-windows-update — minimal fix-stuck-update script
+- https://github.com/ErenElagz/Windows-Update-Fix — DISM/SFC wrapper
+- https://github.com/AdmiralEM/windows-update-repair — PowerShell-only, no EXE dependencies
+- https://github.com/taylornrolyat/Repair-WindowsUpdates — silent, non-rebooting, Win7+Win10 aware
+- https://github.com/Ec-25/FixIt — broader Windows optimization with WU repair subset
+- https://gist.github.com/74Thirsty/18e2b9152c0ca3a2f5d76dcd1b5d6ff4 — WinSxS/Component Store deep-repair recipe
+
+### Features to Borrow
+- WUfB diag log collection via `Get-WindowsUpdateLog` + zipped upload folder
+
+### Patterns & Architectures Worth Studying
+- PowerShell-only, EXE-free approach for policy-locked environments (AdmiralEM)
+- Phased repair pipeline: Diagnose → Stop services → Rebuild stores → Start services → Verify (ManuelGil)
+- Transcript logging (`Start-Transcript`) with a timestamped folder per run for support escalation
+- Exit-code discipline: each phase returns a distinct code so orchestrators can branch
+- Idempotency: each action checks current state before mutating, safe to re-run
+```
+
+</details>
