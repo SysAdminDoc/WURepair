@@ -136,7 +136,11 @@ Describe 'WURepair static contract' {
             'Get-WURestorePointFailureKind',
             'New-WURestorePointOutcome',
             'Get-CommandLineOptionValue',
-            'Get-WinREDiagnostic'
+            'Get-WinREDiagnostic',
+            'ConvertTo-WUPendingUpdateRecord',
+            'Get-WUPendingUpdateDiagnostic',
+            'Reset-WSUSClientIdentity',
+            'Write-HtmlRepairReport'
         )
     }
 
@@ -225,6 +229,10 @@ Describe 'WURepair static contract' {
             'New-WURestorePointOutcome',
             'Get-CommandLineOptionValue',
             'Get-WinREDiagnostic',
+            'ConvertTo-WUPendingUpdateRecord',
+            'Get-WUPendingUpdateDiagnostic',
+            'Reset-WSUSClientIdentity',
+            'Write-HtmlRepairReport',
             'Get-BitLockerVolume',
             'Enable-ComputerRestore',
             'Checkpoint-Computer',
@@ -1144,6 +1152,62 @@ Describe 'WURepair static contract' {
         { Get-CommandLineOptionValue -Arguments @('-JsonReport') -Name '-JsonReport' } | Should -Throw '*requires a path value*'
     }
 
+    It 'normalizes pending Windows Update records and queries the WUA search boundary' {
+        $update = [PSCustomObject]@{
+            Title = '2026-07 Cumulative Update'
+            KBArticleIDs = @('KB5000001')
+            Identity = [PSCustomObject]@{ UpdateID = 'update-id' }
+            IsDownloaded = $false
+            IsMandatory = $true
+            MaxDownloadSize = 10485760
+            InstallationBehavior = [PSCustomObject]@{ RebootBehavior = 1 }
+            Categories = @([PSCustomObject]@{ Name = 'Security Updates' })
+        }
+        $record = ConvertTo-WUPendingUpdateRecord -Update $update
+        $record.Title | Should -Be '2026-07 Cumulative Update'
+        $record.KBArticleIDs | Should -Contain 'KB5000001'
+        $record.MaxDownloadSizeMB | Should -Be 10
+        $record.Categories | Should -Contain 'Security Updates'
+
+        $script:PendingSearchResult = [PSCustomObject]@{ Updates = @($update) }
+        $searcher = New-Object PSObject
+        Add-Member -InputObject $searcher -MemberType ScriptMethod -Name Search -Value { param($query) $script:PendingQuery = $query; $script:PendingSearchResult }
+        $session = New-Object PSObject
+        Add-Member -InputObject $session -MemberType ScriptMethod -Name CreateUpdateSearcher -Value { $searcher }
+        Mock New-Object { $session } -ParameterFilter { $ComObject -eq 'Microsoft.Update.Session' }
+
+        $diagnostic = Get-WUPendingUpdateDiagnostic
+        $diagnostic.QuerySucceeded | Should -BeTrue
+        $diagnostic.Count | Should -Be 1
+        $diagnostic.Updates[0].UpdateID | Should -Be 'update-id'
+        $diagnostic.Query | Should -Match 'IsInstalled=0'
+    }
+
+    It 'writes an HTML report with per-phase status and pending updates' {
+        $reportPath = Join-Path $TestDrive 'WURepair-report.html'
+        $pre = @{ RepairReadiness = [PSCustomObject]@{ Status = 'Ready' } }
+        $post = @{ RepairReadiness = [PSCustomObject]@{ Status = 'Warning' } }
+        $phase = [PSCustomObject]@{
+            Name = 'Reset WSUS Client Identity'
+            Status = 'Warnings'
+            Warnings = 1
+            Errors = 0
+            DurationSeconds = 2
+        }
+        $pending = [PSCustomObject]@{
+            QuerySucceeded = $true
+            Count = 1
+            Updates = @([PSCustomObject]@{ Title = 'Security update'; KBArticleIDs = @('KB1'); IsMandatory = $true; MaxDownloadSizeMB = 5 })
+        }
+
+        Write-HtmlRepairReport -Path $reportPath -StartTime (Get-Date) -EndTime (Get-Date).AddSeconds(2) -ModeLabel 'Targeted repair' -OverallStatus 'Warnings' -PreReport $pre -PostReport $post -PhaseResults @($phase) -PlannedSteps @() -PendingUpdates $pending | Should -Be $reportPath
+        $html = Get-Content -LiteralPath $reportPath -Raw
+        $html | Should -Match 'Reset WSUS Client Identity'
+        $html | Should -Match 'status-Warnings'
+        $html | Should -Match 'Security update'
+        $html | Should -Match 'No data was uploaded'
+    }
+
     It 'keeps public options aligned across script module help CLI and README surfaces' {
         $script:ModuleParseErrors.Count | Should -Be 0
         $startOptions = @(Get-WURepairFunctionParameterInfo -Ast $script:Ast -Name 'Start-WURepair')
@@ -1217,6 +1281,11 @@ Describe 'WURepair static contract' {
         $policyOnly.SelectiveMode | Should -BeTrue
         $policyOnly.ResetPolicies | Should -BeTrue
         $policyOnly.RepairStore | Should -BeFalse
+
+        $wsusOnly = Resolve-WURepairPhaseSelection -ResetWSUSClient
+        $wsusOnly.SelectiveMode | Should -BeTrue
+        $wsusOnly.ResetWSUSClient | Should -BeTrue
+        $wsusOnly.RepairServices | Should -BeFalse
 
         $quick = Resolve-WURepairPhaseSelection -QuickMode
         $quick.SelectiveMode | Should -BeFalse

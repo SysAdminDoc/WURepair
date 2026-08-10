@@ -67,10 +67,14 @@ function Invoke-WURepair {
         [switch]$ResetPolicies,
         [switch]$RepairAll,
         [switch]$AnalyzeLogs,
+        [switch]$ListPending,
+        [switch]$ResetWSUSClient,
         [string]$DismSource,
         [switch]$DismLimitAccess,
         [string]$JsonReport,
         [string]$SupportBundle,
+        [string]$HtmlReport,
+        [string]$WUfBDiagnostics,
         [string]$JournalPath,
         [string]$RollbackJournal,
         [switch]$ApplyRollback,
@@ -101,6 +105,8 @@ function Invoke-WURepair {
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-ResetPolicies' -Enabled ([bool]$ResetPolicies)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-RepairAll' -Enabled ([bool]$RepairAll)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-AnalyzeLogs' -Enabled ([bool]$AnalyzeLogs)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-ListPending' -Enabled ([bool]$ListPending)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-ResetWSUSClient' -Enabled ([bool]$ResetWSUSClient)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-DismLimitAccess' -Enabled ([bool]$DismLimitAccess)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-ApplyRollback' -Enabled ([bool]$ApplyRollback)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-ResetManagedUpdatePolicy' -Enabled ([bool]$ResetManagedUpdatePolicy)
@@ -114,6 +120,8 @@ function Invoke-WURepair {
     Add-WURepairValueArgument -Arguments $arguments -Name '-DismSource' -Value $DismSource
     Add-WURepairValueArgument -Arguments $arguments -Name '-JsonReport' -Value $JsonReport
     Add-WURepairValueArgument -Arguments $arguments -Name '-SupportBundle' -Value $SupportBundle
+    Add-WURepairValueArgument -Arguments $arguments -Name '-HtmlReport' -Value $HtmlReport
+    Add-WURepairValueArgument -Arguments $arguments -Name '-WUfBDiagnostics' -Value $WUfBDiagnostics
     Add-WURepairValueArgument -Arguments $arguments -Name '-JournalPath' -Value $JournalPath
     Add-WURepairValueArgument -Arguments $arguments -Name '-RollbackJournal' -Value $RollbackJournal
 

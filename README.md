@@ -63,12 +63,15 @@ If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or 
 - **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
 - **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
 - **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, policy-driven update-source settings, and managed-source guardrail status
+- **WSUS Client Reset**: Optional `-ResetWSUSClient` flushes client identity values and requests fresh authorization/detection without removing WSUS policy
 - **WinRE & Quick Machine Recovery**: Reports WinRE enabled/disabled state, recovery partition path, image version, and Quick Machine Recovery policy status
 - **Safe Mode Diagnostics**: Detects normal, Minimal, Network, and Directory Services Repair Safe Mode sessions; `-InSafeMode` enables deeper locked-file cache cleanup
 - **Connectivity Testing**: Tests all Microsoft update endpoints
 - **LTSC/IoT Detection**: Identifies editions with limited update availability
 - **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
 - **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
+- **HTML Repair Report**: Optional `-HtmlReport <path>` writes a local report with repair-plan/per-phase status and pending-update tables
+- **Pending Update Listing**: Optional `-ListPending` queries the Windows Update Agent for visible, not-installed software updates
 - **Support Bundle**: Optional `-SupportBundle <path>` writes a redacted zip with WURepair logs, JSON report, Windows Update log, event exports, and CBS/DISM tails
 - **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
 - **Plain Text Output**: Optional `-PlainText` emits deterministic ASCII status lines for RMM consoles, screen readers, and log capture
@@ -161,8 +164,12 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 | `-DismLimitAccess` | Prevent DISM from using Windows Update as a repair source |
 | `-ResetPolicies` | Reset blocking Windows Update policies as a targeted phase while preserving managed source policy by default |
 | `-AnalyzeLogs` | Export a structured Windows Update log timeline and compact JSON summary |
+| `-ListPending` | List visible pending software updates from the Windows Update Agent; when combined with repair, query after repair |
+| `-ResetWSUSClient` | Reset managed WSUS client identity values and request a fresh authorization/detection cycle |
 | `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
 | `-SupportBundle <path>` | Create a redacted zip with WURepair log, JSON report, WindowsUpdate.log, relevant events, and CBS/DISM tails |
+| `-HtmlReport <path>` | Write a local HTML report with per-phase status and pending-update details |
+| `-WUfBDiagnostics <path>` | Create a zipped Windows Update for Business diagnostic bundle for upload or escalation |
 | `-JournalPath <path>` | Override the mutation journal JSON path |
 | `-RollbackJournal <path>` | Preview reversible changes from a mutation journal |
 | `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
@@ -235,6 +242,15 @@ Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
 
 # Preview a targeted policy reset without changing the machine
 .\WURepair.ps1 -ResetPolicies -WhatIf -JsonReport C:\Temp\WURepair-preview.json
+
+# List updates available to the Windows Update Agent
+.\WURepair.ps1 -ListPending
+
+# Reset a managed WSUS client identity and request re-registration
+.\WURepair.ps1 -ResetWSUSClient -JsonReport C:\Temp\WSUS-reset.json
+
+# Generate an operator-friendly HTML report after repair
+.\WURepair.ps1 -HtmlReport C:\Temp\WURepair-report.html
 
 # Run cache repair from Safe Mode with deeper locked-file cleanup
 .\WURepair.ps1 -RepairStore -InSafeMode
@@ -473,6 +489,9 @@ Contributions are welcome! If you encounter a Windows Update issue that WURepair
 - Added `-WhatIf` read-only repair previews with optional JSON plan output.
 - Added targeted `-ResetPolicies` repair while preserving managed update-source policies by default.
 - Added Safe Mode diagnostics and explicit `-InSafeMode` locked-file cache cleanup.
+- Added WUA-backed `-ListPending` visibility and optional post-repair pending-update reporting.
+- Added `-ResetWSUSClient` for managed WSUS client identity reset and re-registration.
+- Added `-HtmlReport` with per-phase status and pending-update tables.
 
 ### v2.31.0
 

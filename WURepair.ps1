@@ -68,6 +68,7 @@ $Script:Config = @{
     PlainText                          = $false
     WhatIf                             = $false
     InSafeMode                         = $false
+    TranscriptPath                     = $null
     JournalPath                        = "$env:USERPROFILE\Desktop\WURepair_Journal_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     Ui                                 = @{
         AccentColor   = 'Cyan'
@@ -693,6 +694,46 @@ function Write-Log {
     }
 
     Add-Content -Path $Script:Config.LogPath -Value $logMessage -ErrorAction SilentlyContinue
+}
+
+function Start-WURepairTranscript {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    try {
+        $resolvedPath = [Environment]::ExpandEnvironmentVariables($Path)
+        if (Test-Path -LiteralPath $resolvedPath -PathType Container) {
+            $resolvedPath = Join-Path $resolvedPath "WURepair_Transcript_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+        }
+        elseif ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($resolvedPath))) {
+            $resolvedPath = "$resolvedPath.txt"
+        }
+        $parent = Split-Path -Parent $resolvedPath
+        if (-not [string]::IsNullOrWhiteSpace($parent)) {
+            New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        Start-Transcript -Path $resolvedPath -Force -ErrorAction Stop | Out-Null
+        $Script:Config.TranscriptPath = [System.IO.Path]::GetFullPath($resolvedPath)
+        return $Script:Config.TranscriptPath
+    }
+    catch {
+        Write-Log "Could not start transcript '$Path': $($_.Exception.Message)" -Level WARNING
+        return $null
+    }
+}
+
+function Stop-WURepairTranscript {
+    if ([string]::IsNullOrWhiteSpace([string]$Script:Config.TranscriptPath)) {
+        return
+    }
+
+    try {
+        Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
+    }
+    catch { }
 }
 
 function Initialize-WUMutationJournal {
@@ -2275,6 +2316,151 @@ function Get-WSUSPostureDiagnostic {
         ManagedSourceReason  = $managedSourceGuardrail.Reason
         ManagedSourceIndicators = $managedSourceGuardrail.Indicators
         ManagedSourceGuardrail  = $managedSourceGuardrail
+    }
+}
+
+function ConvertTo-WUPendingUpdateRecord {
+    param([AllowNull()][object]$Update)
+
+    if ($null -eq $Update) {
+        return $null
+    }
+
+    $kbArticles = @()
+    try {
+        $kbArticles = @($Update.KBArticleIDs | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    catch { }
+
+    $categories = @()
+    try {
+        $categories = @($Update.Categories | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    catch { }
+
+    $sizeMB = $null
+    try {
+        if ($null -ne $Update.MaxDownloadSize -and [double]$Update.MaxDownloadSize -gt 0) {
+            $sizeMB = [math]::Round(([double]$Update.MaxDownloadSize / 1MB), 2)
+        }
+    }
+    catch { }
+
+    return [PSCustomObject]@{
+        Title             = [string]$Update.Title
+        KBArticleIDs      = $kbArticles
+        UpdateID          = if ($Update.Identity) { [string]$Update.Identity.UpdateID } else { $null }
+        IsDownloaded      = [bool]$Update.IsDownloaded
+        IsMandatory       = [bool]$Update.IsMandatory
+        RebootRequired    = [bool]$Update.InstallationBehavior.RebootBehavior
+        MaxDownloadSizeMB = $sizeMB
+        Categories        = $categories
+    }
+}
+
+function Get-WUPendingUpdateDiagnostic {
+    $result = [ordered]@{
+        SchemaVersion   = '1.0'
+        QuerySucceeded  = $false
+        Query           = "IsInstalled=0 and IsHidden=0 and Type='Software'"
+        Count           = 0
+        Updates         = @()
+        Error           = $null
+        QueriedAt       = (Get-Date).ToString('o')
+    }
+
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
+        $searcher = $session.CreateUpdateSearcher()
+        $searchResult = $searcher.Search($result.Query)
+        $updates = @()
+        for ($index = 0; $index -lt $searchResult.Updates.Count; $index++) {
+            $record = ConvertTo-WUPendingUpdateRecord -Update $searchResult.Updates.Item($index)
+            if ($null -ne $record) {
+                $updates += $record
+            }
+        }
+
+        $result.QuerySucceeded = $true
+        $result.Updates = @($updates)
+        $result.Count = $updates.Count
+    }
+    catch {
+        $result.Error = $_.Exception.Message
+    }
+
+    return [PSCustomObject]$result
+}
+
+function Write-WUPendingUpdateSummary {
+    param([object]$PendingUpdates)
+
+    if ($null -eq $PendingUpdates) {
+        return
+    }
+
+    Write-UiSubheading -Title 'Pending Windows Updates'
+    if (-not $PendingUpdates.QuerySucceeded) {
+        Write-UiCallout -Title 'Pending updates could not be queried.' -Tone 'Warning' -Lines @($PendingUpdates.Error)
+        return
+    }
+
+    if ($PendingUpdates.Count -eq 0) {
+        Write-UiCallout -Title 'No pending software updates were found.' -Tone 'Success' -Lines @(
+            'The Windows Update Agent returned an empty visible, not-installed update set.'
+        )
+        return
+    }
+
+    Write-UiMetric -Label 'Pending update count' -Value ([string]$PendingUpdates.Count) -Tone 'Warning'
+    foreach ($update in $PendingUpdates.Updates) {
+        $kb = if (@($update.KBArticleIDs).Count -gt 0) { " KB $(@($update.KBArticleIDs) -join ', ')" } else { '' }
+        Write-UiMetric -Label $update.Title -Value ("{0}{1}" -f $(if ($update.IsMandatory) { 'Mandatory' } else { 'Optional' }), $kb) -Tone 'Warning' -LabelWidth 42
+    }
+}
+
+function Reset-WSUSClientIdentity {
+    Write-Log 'WSUS - Resetting client identity and authorization state' -Level SECTION
+
+    $posture = Get-WSUSPostureDiagnostic
+    if (-not $posture.IsManagedSource) {
+        Write-Log 'WSUS client reset skipped because no managed WSUS/SUP source policy is configured.' -Level WARNING
+        return
+    }
+
+    $wuPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate'
+    $identityValues = @('AccountDomainSid', 'PingID', 'SusClientId', 'SusClientIdValidation')
+    $removed = 0
+    foreach ($valueName in $identityValues) {
+        try {
+            $currentValue = Get-WURegistryValue -Path $wuPath -Name $valueName
+            if ($null -ne $currentValue) {
+                [void](Remove-WURegistryValueWithJournal -Path $wuPath -Name $valueName -Category 'WSUS' -Action 'ResetWSUSClientIdentity')
+                Write-Log "Removed WSUS client identity value: $valueName" -Level SUCCESS
+                $removed++
+            }
+        }
+        catch {
+            Write-Log "Could not remove WSUS client identity value $valueName`: $($_.Exception.Message)" -Level WARNING
+        }
+    }
+
+    $wuauclt = Get-Command -Name 'wuauclt.exe' -ErrorAction SilentlyContinue
+    if ($wuauclt) {
+        & $wuauclt.Source /resetauthorization /detectnow 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log 'Windows Update authorization reset and detection requested.' -Level SUCCESS
+        }
+        else {
+            Write-Log "wuauclt authorization reset returned exit code $LASTEXITCODE." -Level WARNING
+        }
+    }
+    else {
+        Write-Log 'wuauclt.exe was not found; identity values were reset but detection was not requested.' -Level WARNING
+    }
+
+    if ($removed -eq 0) {
+        Write-Log 'No WSUS client identity values were present to remove.' -Level INFO
     }
 }
 
@@ -4990,7 +5176,8 @@ function Write-JsonRepairReport {
         [object]$WULogTimelineSummary,
         [string]$OverallStatus,
         [int]$ExitCode,
-        [object[]]$PlannedSteps = @()
+        [object[]]$PlannedSteps = @(),
+        [object]$PendingUpdates
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -5017,6 +5204,7 @@ function Write-JsonRepairReport {
             ExitCode               = $ExitCode
             PreviewOnly            = [bool]($Options['WhatIf'])
             PlannedSteps           = @($PlannedSteps)
+            PendingUpdates         = $PendingUpdates
             Options                = $Options
             LogPath                = $Script:Config.LogPath
             MutationJournalPath    = $Script:Config.JournalPath
@@ -5037,6 +5225,98 @@ function Write-JsonRepairReport {
     }
     catch {
         Write-Log "Could not write JSON report '$Path': $($_.Exception.Message)" -Level WARNING
+    }
+}
+
+function Write-HtmlRepairReport {
+    param(
+        [string]$Path,
+        [datetime]$StartTime,
+        [datetime]$EndTime,
+        [string]$ModeLabel,
+        [string]$OverallStatus,
+        [hashtable]$PreReport,
+        [hashtable]$PostReport,
+        [object[]]$PhaseResults,
+        [object[]]$PlannedSteps,
+        [object]$PendingUpdates
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    try {
+        $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        if ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($resolvedPath))) {
+            $resolvedPath = "$resolvedPath.html"
+        }
+        $parent = Split-Path -Parent $resolvedPath
+        if (-not [string]::IsNullOrWhiteSpace($parent)) {
+            New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+
+        $encode = {
+            param([AllowNull()][object]$Value)
+            [System.Net.WebUtility]::HtmlEncode([string]$Value)
+        }
+        $duration = [math]::Round(($EndTime - $StartTime).TotalSeconds, 2)
+        $phaseRows = @($PhaseResults | ForEach-Object {
+            '<tr><td>{0}</td><td class="status-{1}">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>' -f (& $encode $_.Name), (& $encode $_.Status), (& $encode $_.Warnings), (& $encode $_.Errors), (& $encode $_.DurationSeconds)
+        })
+        if ($phaseRows.Count -eq 0) {
+            $phaseRows = @($PlannedSteps | ForEach-Object {
+                '<tr><td>{0}</td><td class="status-planned">Planned</td><td>-</td><td>-</td><td>-</td></tr>' -f (& $encode $_)
+            })
+        }
+        if ($phaseRows.Count -eq 0) {
+            $phaseRows = @('<tr><td colspan="5">No repair phases executed.</td></tr>')
+        }
+
+        $pendingRows = @()
+        if ($PendingUpdates -and $PendingUpdates.QuerySucceeded) {
+            $pendingRows = @($PendingUpdates.Updates | ForEach-Object {
+                $kb = @($_.KBArticleIDs) -join ', '
+                '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td></tr>' -f (& $encode $_.Title), (& $encode $kb), (& $encode $(if ($_.IsMandatory) { 'Yes' } else { 'No' })), (& $encode $_.MaxDownloadSizeMB)
+            })
+        }
+        if ($pendingRows.Count -eq 0) {
+            $pendingRows = @('<tr><td colspan="4">No pending-update records were returned.</td></tr>')
+        }
+
+        $preReadiness = if ($PreReport) { $PreReport['RepairReadiness'] } else { $null }
+        $postReadiness = if ($PostReport) { $PostReport['RepairReadiness'] } else { $null }
+        $html = @(
+            '<!doctype html>',
+            '<html lang="en"><head><meta charset="utf-8"><title>WURepair report</title>',
+            '<style>body{font-family:Segoe UI,Arial,sans-serif;margin:2rem;color:#1f2937;background:#f8fafc}main{max-width:1100px;margin:auto;background:#fff;padding:2rem;border:1px solid #dbe3ec;border-radius:8px}h1,h2{color:#123b5d}table{border-collapse:collapse;width:100%;margin:1rem 0 2rem}th,td{border:1px solid #dbe3ec;padding:.5rem;text-align:left;vertical-align:top}th{background:#eef4f8}.status-Success{color:#087f23;font-weight:600}.status-Warnings,.status-planned{color:#9a6700;font-weight:600}.status-Errors{color:#b42318;font-weight:600}.status-Preview{color:#2563eb;font-weight:600}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.75rem}.card{background:#f8fafc;border:1px solid #e5e7eb;padding:.75rem;border-radius:5px}.muted{color:#64748b}</style></head><body><main>',
+            '<h1>WURepair report</h1>',
+            '<div class="meta">',
+            ('<div class="card"><strong>Mode</strong><br>{0}</div>' -f (& $encode $ModeLabel)),
+            ('<div class="card"><strong>Overall status</strong><br><span class="status-{0}">{0}</span></div>' -f (& $encode $OverallStatus)),
+            ('<div class="card"><strong>Started</strong><br>{0}</div>' -f (& $encode $StartTime.ToString('o'))),
+            ('<div class="card"><strong>Duration</strong><br>{0} seconds</div>' -f (& $encode $duration)),
+            ('<div class="card"><strong>Repair readiness before</strong><br>{0}</div>' -f (& $encode $(if ($preReadiness) { $preReadiness.Status } else { 'Not available' }))),
+            ('<div class="card"><strong>Repair readiness after</strong><br>{0}</div>' -f (& $encode $(if ($postReadiness) { $postReadiness.Status } else { 'Not available' }))),
+            '</div>',
+            '<h2>Repair phases</h2>',
+            '<table><thead><tr><th>Phase</th><th>Status</th><th>Warnings</th><th>Errors</th><th>Seconds</th></tr></thead><tbody>',
+            ($phaseRows -join [Environment]::NewLine),
+            '</tbody></table>',
+            '<h2>Pending updates</h2>',
+            '<table><thead><tr><th>Title</th><th>KB</th><th>Mandatory</th><th>Size MB</th></tr></thead><tbody>',
+            ($pendingRows -join [Environment]::NewLine),
+            '</tbody></table>',
+            '<p class="muted">Generated by WURepair locally. No data was uploaded.</p>',
+            '</main></body></html>'
+        )
+        Set-Content -LiteralPath $resolvedPath -Value ($html -join [Environment]::NewLine) -Encoding UTF8 -Force
+        Write-Log "HTML report written to: $resolvedPath" -Level SUCCESS
+        return $resolvedPath
+    }
+    catch {
+        Write-Log "Could not write HTML report '$Path': $($_.Exception.ToString())" -Level WARNING
+        return $null
     }
 }
 
@@ -5217,6 +5497,112 @@ function Add-WUSupportBundleEventExport {
     }
 }
 
+function Resolve-WUfBDiagnosticsPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+
+    $resolvedPath = [Environment]::ExpandEnvironmentVariables($Path)
+    if (Test-Path -LiteralPath $resolvedPath -PathType Container) {
+        $resolvedPath = Join-Path $resolvedPath "WURepair_WUfB_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
+    }
+    elseif ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($resolvedPath))) {
+        $resolvedPath = "$resolvedPath.zip"
+    }
+    $parent = Split-Path -Parent $resolvedPath
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        $resolvedPath = Join-Path (Get-Location).Path $resolvedPath
+        $parent = Split-Path -Parent $resolvedPath
+    }
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+    return [System.IO.Path]::GetFullPath($resolvedPath)
+}
+
+function New-WUfBDiagnosticBundle {
+    param(
+        [string]$Path,
+        [string]$JsonReportPath,
+        [hashtable]$DiagnosticReport,
+        [object]$PendingUpdates,
+        [switch]$NoRedact
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    try {
+        $bundlePath = Resolve-WUfBDiagnosticsPath -Path $Path
+        if ([string]::IsNullOrWhiteSpace($bundlePath)) {
+            return $null
+        }
+        if (-not (Test-Path -LiteralPath $Script:Config.TempPath)) {
+            New-Item -Path $Script:Config.TempPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $bundleRoot = Join-Path $Script:Config.TempPath "WURepair_WUfB_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$([guid]::NewGuid().ToString('N'))"
+        New-Item -Path $bundleRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $files = New-Object 'System.Collections.Generic.List[object]'
+
+        $windowsUpdateLog = Join-Path $bundleRoot 'WindowsUpdate.log'
+        $getWindowsUpdateLog = Get-Command -Name 'Get-WindowsUpdateLog' -ErrorAction SilentlyContinue
+        if ($getWindowsUpdateLog) {
+            try {
+                & $getWindowsUpdateLog.Name -LogPath $windowsUpdateLog -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Set-Content -LiteralPath $windowsUpdateLog -Value "Get-WindowsUpdateLog failed: $($_.Exception.Message)" -Encoding UTF8 -Force
+            }
+        }
+        else {
+            Set-Content -LiteralPath $windowsUpdateLog -Value 'Get-WindowsUpdateLog is not available in this PowerShell session.' -Encoding UTF8 -Force
+        }
+        [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'logs\WindowsUpdate.log' -SourcePath $windowsUpdateLog -NoRedact:$NoRedact))
+
+        $policyObject = [ordered]@{
+            GeneratedAt = (Get-Date).ToString('o')
+            WSUSPosture = if ($DiagnosticReport) { $DiagnosticReport['WSUSPosture'] } else { $null }
+            RepairReadiness = if ($DiagnosticReport) { $DiagnosticReport['RepairReadiness'] } else { $null }
+            SafeMode = if ($DiagnosticReport) { $DiagnosticReport['SafeMode'] } else { $null }
+        }
+        [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'policy\WUFB-policy.json' -Content ($policyObject | ConvertTo-Json -Depth 10) -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'reports\WURepair-report.json' -SourcePath $JsonReportPath -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\WindowsUpdateClient-Operational.json' -LogName 'Microsoft-Windows-WindowsUpdateClient/Operational' -NoRedact:$NoRedact))
+        [void]$files.Add((Add-WUSupportBundleEventExport -BundleRoot $bundleRoot -RelativePath 'events\UpdateOrchestrator-Operational.json' -LogName 'Microsoft-Windows-UpdateOrchestrator/Operational' -NoRedact:$NoRedact))
+
+        if ($PendingUpdates) {
+            [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'reports\pending-updates.json' -Content ($PendingUpdates | ConvertTo-Json -Depth 10) -NoRedact:$NoRedact))
+        }
+
+        $manifest = [ordered]@{
+            SchemaVersion = '1.0'
+            Tool          = 'WURepair'
+            Version       = $Script:Config.Version
+            CreatedAt     = (Get-Date).ToString('o')
+            BundleType    = 'WindowsUpdateForBusinessDiagnostics'
+            Redaction     = if ($NoRedact) { 'Disabled' } else { 'Enabled' }
+            GeneratedWith = if ($getWindowsUpdateLog) { 'Get-WindowsUpdateLog' } else { 'Unavailable' }
+            Files         = @($files.ToArray() | ForEach-Object { [PSCustomObject]@{ RelativePath = $_.RelativePath; SourcePath = $_.SourcePath; Status = $_.Status; Bytes = $_.Bytes } })
+        }
+        [void]$files.Add((Add-WUSupportBundleTextFile -BundleRoot $bundleRoot -RelativePath 'manifest.json' -Content ($manifest | ConvertTo-Json -Depth 10) -NoRedact:$NoRedact))
+
+        if (Test-Path -LiteralPath $bundlePath) {
+            Remove-Item -LiteralPath $bundlePath -Force -ErrorAction Stop
+        }
+        Compress-Archive -Path (Join-Path $bundleRoot '*') -DestinationPath $bundlePath -Force
+        Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "WUfB diagnostic bundle written to: $bundlePath" -Level SUCCESS
+        return $bundlePath
+    }
+    catch {
+        Write-Log "Could not create WUfB diagnostic bundle '$Path': $($_.Exception.Message)" -Level WARNING
+        return $null
+    }
+}
+
 function New-WUSupportBundle {
     param(
         [string]$Path,
@@ -5227,6 +5613,7 @@ function New-WUSupportBundle {
         [object[]]$PhaseResults,
         [object]$RestorePointOutcome,
         [object[]]$WULogTimeline,
+        [string]$TranscriptPath,
         [switch]$NoRedact
     )
 
@@ -5250,6 +5637,9 @@ function New-WUSupportBundle {
 
         [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'WURepair.log' -SourcePath $Script:Config.LogPath -NoRedact:$NoRedact))
         [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'WURepair-report.json' -SourcePath $JsonReportPath -NoRedact:$NoRedact))
+        if (-not [string]::IsNullOrWhiteSpace($TranscriptPath)) {
+            [void]$files.Add((Add-WUSupportBundleFile -BundleRoot $bundleRoot -RelativePath 'WURepair-transcript.txt' -SourcePath $TranscriptPath -NoRedact:$NoRedact))
+        }
 
         $legacyLog = Join-Path $env:SystemRoot 'WindowsUpdate.log'
         $traceLog = Get-WUConvertedTraceLogPath
@@ -5343,10 +5733,11 @@ function Resolve-WURepairPhaseSelection {
         [switch]$RepairDelivery,
         [switch]$RepairServicingStack,
         [switch]$ResetPolicies,
+        [switch]$ResetWSUSClient,
         [switch]$RepairAll
     )
 
-    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack -or $ResetPolicies)
+    $selectiveMode = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack -or $ResetPolicies -or $ResetWSUSClient)
     if ($RepairAll -or (-not $selectiveMode)) {
         $RepairServices = $true
         $RepairDLLs     = $true
@@ -5357,6 +5748,7 @@ function Resolve-WURepairPhaseSelection {
         $RepairWaaS     = $true
         $RepairDelivery = $true
         $ResetPolicies  = $false
+        $ResetWSUSClient = $false
         $selectiveMode  = $false
     }
 
@@ -5375,6 +5767,7 @@ function Resolve-WURepairPhaseSelection {
         RepairDelivery      = [bool]$RepairDelivery
         RepairServicingStack = [bool]$RepairServicingStack
         ResetPolicies       = [bool]$ResetPolicies
+        ResetWSUSClient     = [bool]$ResetWSUSClient
     }
 }
 
@@ -5478,8 +5871,13 @@ function Start-WURepair {
         [switch]$StageSSU,
         [switch]$RepairAll,
         [switch]$AnalyzeLogs,
+        [switch]$ListPending,
+        [switch]$ResetWSUSClient,
         [string]$JsonReport,
         [string]$SupportBundle,
+        [string]$HtmlReport,
+        [string]$WUfBDiagnostics,
+        [string]$TranscriptPath,
         [string]$JournalPath,
         [string]$RollbackJournal,
         [string]$DismSource,
@@ -5529,7 +5927,37 @@ function Start-WURepair {
         return $Script:LastRunExitCode
     }
 
-    $phaseSelection = Resolve-WURepairPhaseSelection -SkipDISM:$SkipDISM -SkipSFC:$SkipSFC -QuickMode:$QuickMode -RepairServices:$RepairServices -RepairDLLs:$RepairDLLs -RepairStore:$RepairStore -RepairDISM:$RepairDISM -RepairSFC:$RepairSFC -RepairNetwork:$RepairNetwork -RepairWaaS:$RepairWaaS -RepairDelivery:$RepairDelivery -RepairServicingStack:$RepairServicingStack -ResetPolicies:$ResetPolicies -RepairAll:$RepairAll
+    $repairSelectionRequested = ($RepairServices -or $RepairDLLs -or $RepairStore -or $RepairDISM -or $RepairSFC -or $RepairNetwork -or $RepairWaaS -or $RepairDelivery -or $RepairServicingStack -or $ResetPolicies -or $ResetWSUSClient -or $RepairAll)
+    if ($ListPending -and -not $repairSelectionRequested) {
+        $listStartTime = Get-Date
+        $listTranscript = Start-WURepairTranscript -Path $TranscriptPath
+        $pendingUpdates = Get-WUPendingUpdateDiagnostic
+        Write-WUPendingUpdateSummary -PendingUpdates $pendingUpdates
+        $listEndTime = Get-Date
+        $listMode = 'Pending update listing'
+        $listOptions = @{
+            ListPending    = $true
+            Unattended     = [bool]$Unattended
+            PlainText      = [bool]$PlainText
+            WhatIf         = [bool]$WhatIf
+            HtmlReport     = $HtmlReport
+            SupportBundle  = $SupportBundle
+            TranscriptPath = $TranscriptPath
+        }
+        $listReport = @{ PendingUpdates = $pendingUpdates; RepairReadiness = $null; Services = @() }
+        $listExitCode = if ($pendingUpdates.QuerySucceeded) { $Script:ExitCodes.Success } else { $Script:ExitCodes.Warnings }
+        if (-not [string]::IsNullOrWhiteSpace($JsonReport)) {
+            Write-JsonRepairReport -Path $JsonReport -StartTime $listStartTime -EndTime $listEndTime -Duration ($listEndTime - $listStartTime) -ModeLabel $listMode -SelectiveMode $true -PreReport $listReport -PostReport $listReport -PostConnectivity $true -PhaseResults @() -Options $listOptions -RestorePointOutcome $null -WULogTimelineSummary $null -OverallStatus $(if ($pendingUpdates.QuerySucceeded) { 'Success' } else { 'Warnings' }) -ExitCode $listExitCode -PendingUpdates $pendingUpdates
+        }
+        if (-not [string]::IsNullOrWhiteSpace($HtmlReport)) {
+            Write-HtmlRepairReport -Path $HtmlReport -StartTime $listStartTime -EndTime $listEndTime -ModeLabel $listMode -OverallStatus $(if ($pendingUpdates.QuerySucceeded) { 'Success' } else { 'Warnings' }) -PreReport $listReport -PostReport $listReport -PhaseResults @() -PlannedSteps @() -PendingUpdates $pendingUpdates | Out-Null
+        }
+        Stop-WURepairTranscript
+        $Script:LastRunExitCode = $listExitCode
+        return $Script:LastRunExitCode
+    }
+
+    $phaseSelection = Resolve-WURepairPhaseSelection -SkipDISM:$SkipDISM -SkipSFC:$SkipSFC -QuickMode:$QuickMode -RepairServices:$RepairServices -RepairDLLs:$RepairDLLs -RepairStore:$RepairStore -RepairDISM:$RepairDISM -RepairSFC:$RepairSFC -RepairNetwork:$RepairNetwork -RepairWaaS:$RepairWaaS -RepairDelivery:$RepairDelivery -RepairServicingStack:$RepairServicingStack -ResetPolicies:$ResetPolicies -ResetWSUSClient:$ResetWSUSClient -RepairAll:$RepairAll
     $selectiveMode        = $phaseSelection.SelectiveMode
     $RepairServices       = $phaseSelection.RepairServices
     $RepairDLLs           = $phaseSelection.RepairDLLs
@@ -5541,6 +5969,7 @@ function Start-WURepair {
     $RepairDelivery       = $phaseSelection.RepairDelivery
     $RepairServicingStack = $phaseSelection.RepairServicingStack
     $ResetPolicies        = $phaseSelection.ResetPolicies
+    $ResetWSUSClient      = $phaseSelection.ResetWSUSClient
 
     $dismSourceSpec = $null
     if ($RepairDISM -and -not [string]::IsNullOrWhiteSpace($DismSource)) {
@@ -5571,10 +6000,12 @@ function Start-WURepair {
     }
 
     $startTime = Get-Date
+    [void](Start-WURepairTranscript -Path $TranscriptPath)
     $modeLabel = if ($selectiveMode) { 'Targeted repair' } else { 'Full guided repair' }
     $effectiveJsonReport = $JsonReport
     $restorePointDescription = 'WURepair - Before Windows Update Reset'
     $restorePointOutcome = $null
+    $pendingUpdates = $null
     if (-not [string]::IsNullOrWhiteSpace($SupportBundle) -and [string]::IsNullOrWhiteSpace($effectiveJsonReport)) {
         $effectiveJsonReport = Join-Path $Script:Config.TempPath "WURepair-report_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
     }
@@ -5611,6 +6042,8 @@ function Start-WURepair {
         ResetPolicies            = [bool]$ResetPolicies
         StageSSU                 = [bool]$StageSSU
         AnalyzeLogs              = [bool]$AnalyzeLogs
+        ListPending              = [bool]$ListPending
+        ResetWSUSClient          = [bool]$ResetWSUSClient
         DismSource               = $DismSource
         DismResolvedSource       = if ($dismSourceSpec) { $dismSourceSpec.SourceArgument } else { $null }
         DismSourceType           = if ($dismSourceSpec) { $dismSourceSpec.SourceType } else { $null }
@@ -5625,6 +6058,9 @@ function Start-WURepair {
         ResetManagedUpdatePolicy = [bool]$ResetManagedUpdatePolicy
         OverrideReadinessBlock   = [bool]$OverrideReadinessBlock
         SupportBundle            = $SupportBundle
+        HtmlReport               = $HtmlReport
+        WUfBDiagnostics           = $WUfBDiagnostics
+        TranscriptPath           = $TranscriptPath
         NoRedact                 = [bool]$NoRedact
         JournalPath              = $Script:Config.JournalPath
         RepairReadiness          = $repairReadiness
@@ -5662,9 +6098,14 @@ function Start-WURepair {
         if ($RepairDelivery) { $plannedSteps += 'Reset Delivery Optimization cache and download-mode policy.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
         if ($ResetPolicies) { $plannedSteps += 'Remove blocking Windows Update policy values while preserving managed WSUS/SUP/WUfB source policy by default.' }
+        if ($ResetWSUSClient) { $plannedSteps += 'Reset WSUS client identity values and request a fresh authorization/detection cycle.' }
+        if ($ListPending) { $plannedSteps += 'Query the Windows Update Agent for visible pending software updates after repair.' }
         if ($AnalyzeLogs) { $plannedSteps += 'Export a structured Windows Update log timeline.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
         if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
+        if (-not [string]::IsNullOrWhiteSpace($HtmlReport)) { $plannedSteps += "Write an HTML repair report to $HtmlReport." }
+        if (-not [string]::IsNullOrWhiteSpace($WUfBDiagnostics)) { $plannedSteps += "Create a WUfB diagnostic ZIP at $WUfBDiagnostics." }
+        if (-not [string]::IsNullOrWhiteSpace($TranscriptPath)) { $plannedSteps += "Capture a PowerShell transcript at $TranscriptPath." }
     }
     else {
         $plannedSteps += @(
@@ -5682,6 +6123,8 @@ function Start-WURepair {
         if ($RepairDISM -and $StageSSU) { $plannedSteps += 'Stage the latest applicable Servicing Stack Update before DISM.' }
         elseif ($StageSSU) { $plannedSteps += 'SSU staging was requested, but it will be skipped because DISM is not running.' }
         if ($RepairServicingStack) { $plannedSteps += 'Repair the Servicing Stack by downloading and installing a matching Microsoft Update Catalog SSU.' }
+        if ($ResetWSUSClient) { $plannedSteps += 'Reset WSUS client identity values and request a fresh authorization/detection cycle.' }
+        if ($ListPending) { $plannedSteps += 'Query the Windows Update Agent for visible pending software updates after repair.' }
         if ($RepairDISM -and $dismSourceSpec) { $plannedSteps += "Use DISM repair source $($dismSourceSpec.SourceArgument)." }
         if ($RepairDISM -and $DismLimitAccess) { $plannedSteps += 'Run DISM with /LimitAccess so Windows Update is not used as a repair source.' }
         if ($RepairDISM) { $plannedSteps += 'Run DISM repairs to heal the Windows component store.' }
@@ -5690,6 +6133,9 @@ function Start-WURepair {
         if ($AnalyzeLogs) { $plannedSteps += 'Export a structured Windows Update log timeline.' }
         if (-not [string]::IsNullOrWhiteSpace($effectiveJsonReport)) { $plannedSteps += "Write machine-parseable JSON repair report to $effectiveJsonReport." }
         if (-not [string]::IsNullOrWhiteSpace($SupportBundle)) { $plannedSteps += "Create a $(if ($NoRedact) { 'non-redacted' } else { 'redacted' }) support bundle at $SupportBundle." }
+        if (-not [string]::IsNullOrWhiteSpace($HtmlReport)) { $plannedSteps += "Write an HTML repair report to $HtmlReport." }
+        if (-not [string]::IsNullOrWhiteSpace($WUfBDiagnostics)) { $plannedSteps += "Create a WUfB diagnostic ZIP at $WUfBDiagnostics." }
+        if (-not [string]::IsNullOrWhiteSpace($TranscriptPath)) { $plannedSteps += "Capture a PowerShell transcript at $TranscriptPath." }
     }
 
     $estimatedDuration = Get-EstimatedRepairDuration -SelectiveMode $selectiveMode -RepairDISM $RepairDISM -RepairSFC $RepairSFC -RepairNetwork $RepairNetwork -RepairStore $RepairStore -RepairWaaS $RepairWaaS -RepairDelivery $RepairDelivery -RepairServicingStack $RepairServicingStack -StageSSU $StageSSU
@@ -5734,8 +6180,15 @@ function Start-WURepair {
             'Diagnostics, plan generation, and requested report artifacts are read-only for this run.',
             'Run without -WhatIf when you are ready to execute the listed phases.'
         )
+        if ($ListPending) {
+            $pendingUpdates = Get-WUPendingUpdateDiagnostic
+            Write-WUPendingUpdateSummary -PendingUpdates $pendingUpdates
+        }
         $previewEndTime = Get-Date
-        Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $previewEndTime -Duration ($previewEndTime - $startTime) -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $preReport -PostConnectivity $connectivity -PhaseResults @() -Options $reportOptions -RestorePointOutcome $null -WULogTimelineSummary $null -OverallStatus 'Preview' -ExitCode $Script:ExitCodes.Success -PlannedSteps $plannedSteps
+        Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $previewEndTime -Duration ($previewEndTime - $startTime) -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $preReport -PostConnectivity $connectivity -PhaseResults @() -Options $reportOptions -RestorePointOutcome $null -WULogTimelineSummary $null -OverallStatus 'Preview' -ExitCode $Script:ExitCodes.Success -PlannedSteps $plannedSteps -PendingUpdates $pendingUpdates
+        if (-not [string]::IsNullOrWhiteSpace($HtmlReport)) {
+            Write-HtmlRepairReport -Path $HtmlReport -StartTime $startTime -EndTime $previewEndTime -ModeLabel $modeLabel -OverallStatus 'Preview' -PreReport $preReport -PostReport $preReport -PhaseResults @() -PlannedSteps $plannedSteps -PendingUpdates $pendingUpdates | Out-Null
+        }
         $Script:LastRunExitCode = $Script:ExitCodes.Success
         return $Script:LastRunExitCode
     }
@@ -5818,6 +6271,9 @@ function Start-WURepair {
     }
     if ($ResetPolicies) {
         $phases += @{ Name = 'Reset Blocking Policies';    Action = { Repair-UpdatePolicies -ResetManagedUpdatePolicy:$ResetManagedUpdatePolicy } }
+    }
+    if ($ResetWSUSClient) {
+        $phases += @{ Name = 'Reset WSUS Client Identity'; Action = { Reset-WSUSClientIdentity } }
     }
     if ($RepairStore) {
         if (-not $SkipBackup -and $Script:Config.CreateBackup) {
@@ -5924,6 +6380,11 @@ function Start-WURepair {
     # Trigger Windows Update check
     Invoke-WindowsUpdateCheck
 
+    if ($ListPending) {
+        $pendingUpdates = Get-WUPendingUpdateDiagnostic
+        Write-WUPendingUpdateSummary -PendingUpdates $pendingUpdates
+    }
+
     # ── Event log summary ──
     $endTime = Get-Date
     $duration = $endTime - $startTime
@@ -5968,7 +6429,10 @@ function Start-WURepair {
         $wuLogTimelineSummary = Get-WULogTimelineSummary -Timeline $wuLogTimeline
     }
 
-    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -RestorePointOutcome $restorePointOutcome -WULogTimelineSummary $wuLogTimelineSummary -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode
+    Write-JsonRepairReport -Path $effectiveJsonReport -StartTime $startTime -EndTime $endTime -Duration $duration -ModeLabel $modeLabel -SelectiveMode $selectiveMode -PreReport $preReport -PostReport $postReport -PostConnectivity $postConnectivity -PhaseResults $phaseResults -Options $reportOptions -RestorePointOutcome $restorePointOutcome -WULogTimelineSummary $wuLogTimelineSummary -OverallStatus $overallStatus -ExitCode $Script:LastRunExitCode -PendingUpdates $pendingUpdates
+    if (-not [string]::IsNullOrWhiteSpace($HtmlReport)) {
+        Write-HtmlRepairReport -Path $HtmlReport -StartTime $startTime -EndTime $endTime -ModeLabel $modeLabel -OverallStatus $overallStatus -PreReport $preReport -PostReport $postReport -PhaseResults $phaseResults -PlannedSteps $plannedSteps -PendingUpdates $pendingUpdates | Out-Null
+    }
 
     # Summary
     Write-Log "COMPLETE - Windows Update Repair Finished" -Level SECTION
@@ -6035,8 +6499,12 @@ function Show-Help {
         '-DismLimitAccess      Prevent DISM from using Windows Update as a repair source.',
         '-ResetPolicies        Reset blocking Windows Update policies as a targeted phase.',
         '-AnalyzeLogs          Export a structured Windows Update log timeline.',
+        '-ListPending          List visible pending software updates from the Windows Update Agent.',
+        '-ResetWSUSClient      Reset managed WSUS client identity values and request re-registration.',
         '-JsonReport <path>    Write pre/post diagnostic delta as JSON for RMM ingestion.',
         '-SupportBundle <path> Create a redacted zip with logs, events, JSON, and CBS/DISM tails.',
+        '-HtmlReport <path>    Write an operator-friendly HTML report with per-phase status.',
+        '-WUfBDiagnostics <path>  Create a zipped Windows Update for Business diagnostic bundle.',
         '-JournalPath <path>   Override the mutation journal JSON path.',
         '-RollbackJournal <path>  Preview reversible changes from a mutation journal.',
         '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
@@ -6072,6 +6540,9 @@ function Show-Help {
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess',
         '.\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -ListPending',
+        '.\WURepair.ps1 -ResetWSUSClient -JsonReport C:\Temp\WSUS-reset.json',
+        '.\WURepair.ps1 -HtmlReport C:\Temp\WURepair-report.html',
         '.\WURepair.ps1 -ResetPolicies -WhatIf',
         '.\WURepair.ps1 -RepairStore -InSafeMode',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
@@ -6134,6 +6605,8 @@ if ($args -contains '-RepairDelivery') { $params['RepairDelivery'] = $true }
 if ($args -contains '-RepairServicingStack') { $params['RepairServicingStack'] = $true }
 if ($args -contains '-ResetPolicies' -or $args -contains '-RepairPolicies') { $params['ResetPolicies'] = $true }
 if ($args -contains '-RepairAll') { $params['RepairAll'] = $true }
+if ($args -contains '-ListPending') { $params['ListPending'] = $true }
+if ($args -contains '-ResetWSUSClient') { $params['ResetWSUSClient'] = $true }
 if ($args -contains '-Unattended') { $params['Unattended'] = $true; $Script:Config.Unattended = $true }
 if ($args -contains '-ApplyRollback') { $params['ApplyRollback'] = $true }
 if ($args -contains '-ResetManagedUpdatePolicy') { $params['ResetManagedUpdatePolicy'] = $true }
@@ -6150,6 +6623,12 @@ if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] 
 
 $supportBundlePath = Get-CommandLineOptionValue -Arguments $args -Name '-SupportBundle'
 if (-not [string]::IsNullOrWhiteSpace($supportBundlePath)) { $params['SupportBundle'] = $supportBundlePath }
+
+$htmlReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-HtmlReport'
+if (-not [string]::IsNullOrWhiteSpace($htmlReportPath)) { $params['HtmlReport'] = $htmlReportPath }
+
+$wufbDiagnosticsPath = Get-CommandLineOptionValue -Arguments $args -Name '-WUfBDiagnostics'
+if (-not [string]::IsNullOrWhiteSpace($wufbDiagnosticsPath)) { $params['WUfBDiagnostics'] = $wufbDiagnosticsPath }
 
 $journalPath = Get-CommandLineOptionValue -Arguments $args -Name '-JournalPath'
 if (-not [string]::IsNullOrWhiteSpace($journalPath)) { $params['JournalPath'] = $journalPath }
