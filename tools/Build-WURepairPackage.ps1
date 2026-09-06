@@ -160,6 +160,79 @@ function Get-PackageFileSha256 {
     }
 }
 
+function ConvertTo-PortableArtifactReceipt {
+    param([object[]]$Artifacts)
+
+    return @($Artifacts | ForEach-Object {
+        $artifact = $_
+        [ordered]@{
+            Name         = $artifact.Name
+            Path         = Split-Path -Leaf ([string]$artifact.Path)
+            SHA256       = $artifact.SHA256
+            Signing      = [ordered]@{
+                Status = $artifact.Signing.Status
+                Files  = @($artifact.Signing.Files | ForEach-Object { Split-Path -Leaf ([string]$_) })
+            }
+            FileCatalog  = [ordered]@{
+                Status = $artifact.FileCatalog.Status
+                Path   = Split-Path -Leaf ([string]$artifact.FileCatalog.Path)
+            }
+            ChecksumFile = Split-Path -Leaf ([string]$artifact.ChecksumFile)
+        }
+    })
+}
+
+function ConvertTo-PortableVerificationReceipt {
+    param([object]$Verification)
+
+    $packages = @($Verification.Packages | ForEach-Object {
+        $package = $_
+        $moduleImport = $null
+        if ($package.ModuleImport) {
+            $moduleImport = [ordered]@{
+                Name              = $package.ModuleImport.Name
+                Version           = $package.ModuleImport.Version
+                ExportedFunctions = @($package.ModuleImport.ExportedFunction)
+            }
+        }
+        [ordered]@{
+            Name                 = $package.Name
+            FileName             = Split-Path -Leaf ([string]$package.ZipPath)
+            SHA256               = $package.ZipSHA256
+            ChecksumVerified     = $package.ChecksumVerified
+            Catalog              = if ($package.Catalog) {
+                [ordered]@{
+                    Status   = $package.Catalog.Status
+                    FileName = Split-Path -Leaf ([string]$package.Catalog.Path)
+                }
+            } else { $null }
+            AuthenticodeStatuses = @($package.AuthenticodeStatuses)
+            ModuleImport         = $moduleImport
+        }
+    })
+
+    return [ordered]@{
+        Tool       = $Verification.Tool
+        Version    = $Verification.Version
+        VerifiedAt = $Verification.VerifiedAt
+        Packages   = $packages
+    }
+}
+
+function Write-PortableReleaseReceipt {
+    param(
+        [hashtable]$Receipt,
+        [string]$Path,
+        [int]$Depth = 10
+    )
+
+    $json = $Receipt | ConvertTo-Json -Depth $Depth
+    if ($json -match '[A-Za-z]:\\\\') {
+        throw 'Release receipt contains an absolute Windows path.'
+    }
+    Set-Content -LiteralPath $Path -Value $json -Encoding UTF8 -Force
+}
+
 function New-WURepairArtifact {
     param(
         [string]$Name,
@@ -241,21 +314,22 @@ try {
     Set-Content -LiteralPath $releaseChecksumPath -Value $releaseChecksumRows -Encoding ASCII -Force
 
     $receipt = [ordered]@{
+        SchemaVersion         = 2
         Tool                  = 'WURepair'
         Version               = $version
         CreatedAt             = (Get-Date).ToString('o')
         SigningRequested      = -not [string]::IsNullOrWhiteSpace($CertificateThumbprint)
         RequireSignature      = [bool]$RequireSignature
         CertificateThumbprint = if ($certificate) { $certificate.Thumbprint } else { $null }
-        ReleaseChecksumPath   = $releaseChecksumPath
-        Artifacts             = $artifacts
+        ReleaseChecksumPath   = Split-Path -Leaf $releaseChecksumPath
+        Artifacts             = @(ConvertTo-PortableArtifactReceipt -Artifacts $artifacts)
     }
     $receiptPath = Join-Path $outputRoot ("WURepair-release-v{0}.json" -f $version)
-    Set-Content -LiteralPath $receiptPath -Value ($receipt | ConvertTo-Json -Depth 8) -Encoding UTF8 -Force
+    Write-PortableReleaseReceipt -Receipt $receipt -Path $receiptPath -Depth 8
 
     $verification = & (Join-Path $PSScriptRoot 'Test-WURepairPackage.ps1') -PackageRoot $outputRoot -Version $version -RequireValidSignature:$RequireSignature
-    $receipt['PackageVerification'] = $verification
-    Set-Content -LiteralPath $receiptPath -Value ($receipt | ConvertTo-Json -Depth 10) -Encoding UTF8 -Force
+    $receipt['PackageVerification'] = ConvertTo-PortableVerificationReceipt -Verification $verification
+    Write-PortableReleaseReceipt -Receipt $receipt -Path $receiptPath -Depth 10
 
     $receipt
 }

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/Version-v2.32.0-147DFF?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-v2.32.1-147DFF?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-47EDB0?style=flat-square">
   <img alt="Platform" src="https://img.shields.io/badge/Windows-10%20%7C%2011-70B7FF?style=flat-square">
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-5.1%2B-8DA2BC?style=flat-square">
@@ -223,11 +223,11 @@ Detection returns `0` for compliant devices and `1` when remediation is needed. 
 Each release publishes two ZIPs, a release receipt, and a SHA256 manifest. The ZIPs also contain per-file checksums and a file catalog when the current Windows host supports catalog creation.
 
 ```powershell
-certutil -hashfile .\WURepair-script-v2.32.0.zip SHA256
-certutil -hashfile .\WURepair-module-v2.32.0.zip SHA256
+certutil -hashfile .\WURepair-script-v2.32.1.zip SHA256
+certutil -hashfile .\WURepair-module-v2.32.1.zip SHA256
 ```
 
-Compare both values with `WURepair-v2.32.0-SHA256SUMS.txt`. Release scripts are not Authenticode-signed unless the release notes say otherwise.
+Compare both values with `WURepair-v2.32.1-SHA256SUMS.txt`. Release scripts are not Authenticode-signed unless the release notes say otherwise.
 
 ## Build and test
 
@@ -250,15 +250,12 @@ Signing is optional when building locally:
 .\tools\Build-WURepairPackage.ps1 -CertificateThumbprint '<thumbprint>' -RequireSignature
 ```
 
-## What's new in v2.32.0
+## What's new in v2.32.1
 
-- Added a safe `-Demo` path that works without administrator rights or system inspection.
-- Redesigned local HTML reports around readiness, policy protection, recovery evidence, phase results, and pending updates.
-- Replaced the old generic artwork with a distinctive recovery-and-diagnostics identity, including transparent PNG and ICO assets.
-- Added verified product screenshots and a repository-ready social card.
-- Package builds now preserve the asset tree and publish a release-level SHA256 manifest.
-- Command-line and module runs now forward `-TranscriptPath` correctly.
-- Replaced Unicode console decoration with portable ASCII output for Windows PowerShell 5.1.
+- Release receipts now use portable filenames and no longer expose build-machine paths.
+- Package verification starts with the folder you selected, so a downloaded release cannot be replaced by a local build with the same name.
+- Receipt schema 2 keeps checksum, catalog, signature, and module-import evidence without temporary paths.
+- Release tools load the in-box security and archive modules even when another module path shadows them.
 
 See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 

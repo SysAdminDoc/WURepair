@@ -52,13 +52,21 @@ function Resolve-PackageArtifactPath {
         [string]$FileName
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($ReceiptPath) -and (Test-Path -LiteralPath $ReceiptPath)) {
-        return (Resolve-Path -LiteralPath $ReceiptPath).ProviderPath
-    }
-
     $fallback = Join-Path $PackageRoot $FileName
     if (Test-Path -LiteralPath $fallback) {
         return (Resolve-Path -LiteralPath $fallback).ProviderPath
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ReceiptPath)) {
+        $receiptCandidate = if ([IO.Path]::IsPathRooted($ReceiptPath)) {
+            $ReceiptPath
+        }
+        else {
+            Join-Path $PackageRoot $ReceiptPath
+        }
+        if (Test-Path -LiteralPath $receiptCandidate) {
+            return (Resolve-Path -LiteralPath $receiptCandidate).ProviderPath
+        }
     }
 
     throw "Package artifact not found: $FileName"

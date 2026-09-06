@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.32.1 makes release receipts portable and verifies the selected package folder first.
     v2.32.0 adds a safe product demo, branded local reports, and release artwork.
     v2.31.0 adds Intune proactive remediation detection and remediation scripts.
     v2.30.0 adds WinRE and Quick Machine Recovery diagnostics.
@@ -45,7 +46,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.32.0
+    Version: 2.32.1
 #>
 
 # Administrator rights are enforced inside Start-WURepair so help and demo
@@ -62,7 +63,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.32.0'
+    Version                            = '2.32.1'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
