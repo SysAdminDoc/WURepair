@@ -4,6 +4,13 @@ All notable changes to WURepair will be documented in this file.
 
 ## [Unreleased]
 
+## [v2.32.1] (2026-09-06)
+
+- Release receipt schema 2 now records portable filenames instead of build and temporary paths.
+- Package verification now prefers the selected package folder before consulting legacy receipt paths.
+- Verification receipts retain checksum, catalog, signature, and module-import evidence without exposing local directories.
+- Added regression coverage for portable receipts and selected-folder verification.
+
 ## [v2.32.0] (2026-09-06)
 
 - Added `-Demo`, a no-admin product preview that uses example data and performs no machine checks or repair actions.

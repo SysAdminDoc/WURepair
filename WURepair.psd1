@@ -1,6 +1,6 @@
 @{
     RootModule        = 'WURepair.psm1'
-    ModuleVersion     = '2.32.0'
+    ModuleVersion     = '2.32.1'
     GUID              = '4d2cbad8-1eb2-4a0d-8b94-ccb86fb723ce'
     Author            = 'SysAdminDoc'
     CompanyName       = 'SysAdminDoc'

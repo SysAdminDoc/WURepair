@@ -1,7 +1,7 @@
 # WURepair research
 
 ## Executive Summary
-WURepair is a Windows PowerShell 5.1 script and module for local Windows Update recovery. It covers damaged services, caches, policy blockers, network failures, component-store corruption, and servicing-stack trouble. Version 2.32.0 now includes the trust work identified in this review: a no-admin demo, diagnostics-backed preview, managed-policy protection, readiness gates, rollback journals, local HTML and JSON evidence, redacted support bundles, complete local tests, and consumer-side package verification.
+WURepair is a Windows PowerShell 5.1 script and module for local Windows Update recovery. It covers damaged services, caches, policy blockers, network failures, component-store corruption, and servicing-stack trouble. Version 2.32.1 includes the trust work identified in this review: a no-admin demo, diagnostics-backed preview, managed-policy protection, readiness gates, rollback journals, local HTML and JSON evidence, redacted support bundles, complete local tests, and consumer-side package verification with portable receipts.
 
 The project should keep its repair focus. A resident agent, cloud dashboard, or broad patch manager would make privileged behavior harder to audit. The next useful improvements are Windows Event Forwarding support, a signed release path when a certificate is available, and an optional native interface that preserves the same preview and evidence model.
 

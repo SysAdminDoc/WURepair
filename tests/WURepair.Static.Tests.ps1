@@ -1503,6 +1503,37 @@ Describe 'WURepair static contract' {
         $manifest.PrivateData.PSData.LicenseUri | Should -Match 'LICENSE'
     }
 
+    It 'prefers the selected package folder over a legacy receipt path' {
+        $verifierPath = Join-Path $script:RepoRoot 'tools\Test-WURepairPackage.ps1'
+        $verifierTokens = $null
+        $verifierErrors = $null
+        $verifierAst = [System.Management.Automation.Language.Parser]::ParseFile($verifierPath, [ref]$verifierTokens, [ref]$verifierErrors)
+        $verifierErrors.Count | Should -Be 0
+        $resolverAst = $verifierAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Resolve-PackageArtifactPath'
+        }, $true)
+        $definition = $resolverAst.Extent.Text -replace '^function\s+([^\s{]+)', 'function global:$1'
+        . ([scriptblock]::Create($definition))
+
+        $selectedRoot = Join-Path $TestDrive 'selected-package'
+        $legacyRoot = Join-Path $TestDrive 'legacy-build'
+        New-Item -Path $selectedRoot, $legacyRoot -ItemType Directory -Force | Out-Null
+        $fileName = 'WURepair-script-vtest.zip'
+        $selectedPath = Join-Path $selectedRoot $fileName
+        $legacyPath = Join-Path $legacyRoot $fileName
+        Set-Content -LiteralPath $selectedPath -Value 'downloaded release' -Encoding ASCII
+        Set-Content -LiteralPath $legacyPath -Value 'local build' -Encoding ASCII
+
+        try {
+            $resolved = Resolve-PackageArtifactPath -PackageRoot $selectedRoot -ReceiptPath $legacyPath -FileName $fileName
+            $resolved | Should -Be (Resolve-Path -LiteralPath $selectedPath).ProviderPath
+        }
+        finally {
+            Remove-Item -LiteralPath 'Function:\Resolve-PackageArtifactPath' -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'wires release packaging to local checks signing catalogs and checksums' {
         $packageScriptPath = Join-Path $script:RepoRoot 'tools\Build-WURepairPackage.ps1'
         $verifierScriptPath = Join-Path $script:RepoRoot 'tools\Test-WURepairPackage.ps1'
@@ -1519,6 +1550,10 @@ Describe 'WURepair static contract' {
         $packageScript | Should -Match 'WURepair-module'
         $packageScript | Should -Match 'Test-WURepairPackage\.ps1'
         $packageScript | Should -Match 'PackageVerification'
+        $packageScript | Should -Match 'SchemaVersion\s*=\s*2'
+        $packageScript | Should -Match 'ConvertTo-PortableArtifactReceipt'
+        $packageScript | Should -Match 'ConvertTo-PortableVerificationReceipt'
+        $packageScript | Should -Match 'Write-PortableReleaseReceipt'
         $packageScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Security'
         $packageScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Archive'
         $verifierScript | Should -Match 'Expand-Archive'
@@ -1526,6 +1561,7 @@ Describe 'WURepair static contract' {
         $verifierScript | Should -Match 'Get-AuthenticodeSignature'
         $verifierScript | Should -Match 'Import-Module'
         $verifierScript | Should -Match 'SHA256SUMS\.txt'
+        $verifierScript | Should -Match '\[IO\.Path\]::IsPathRooted'
         $verifierScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Security'
         $verifierScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Archive'
     }
