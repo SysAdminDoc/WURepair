@@ -5,6 +5,22 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+$windowsSecurityModule = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+if (Test-Path -LiteralPath $windowsSecurityModule -PathType Leaf) {
+    Import-Module -Name $windowsSecurityModule -Force -ErrorAction Stop
+}
+else {
+    Import-Module -Name Microsoft.PowerShell.Security -Force -ErrorAction Stop
+}
+
+$windowsArchiveModule = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Archive\Microsoft.PowerShell.Archive.psd1'
+if (Test-Path -LiteralPath $windowsArchiveModule -PathType Leaf) {
+    Import-Module -Name $windowsArchiveModule -Force -ErrorAction Stop
+}
+else {
+    Import-Module -Name Microsoft.PowerShell.Archive -Force -ErrorAction Stop
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = Join-Path $repoRoot 'dist'
@@ -181,6 +197,16 @@ $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | Conver
 if ([string]$receipt.Version -ne [string]$Version) {
     throw "Release receipt version mismatch. Expected $Version; got $($receipt.Version)."
 }
+$releaseChecksumName = "WURepair-v{0}-SHA256SUMS.txt" -f $Version
+$releaseChecksumPath = Resolve-PackageArtifactPath -PackageRoot $packageRootPath -ReceiptPath ([string]$receipt.ReleaseChecksumPath) -FileName $releaseChecksumName
+$releaseChecksumRows = @(Get-Content -LiteralPath $releaseChecksumPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+$releaseChecksums = @{}
+foreach ($row in $releaseChecksumRows) {
+    if ($row -notmatch '^(?<Hash>[A-Fa-f0-9]{64})\s+(?<Name>[^\\/]+\.zip)$') {
+        throw "Invalid release checksum row: $row"
+    }
+    $releaseChecksums[$Matches.Name] = $Matches.Hash.ToUpperInvariant()
+}
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("WURepairPackageVerify_{0}" -f ([guid]::NewGuid().ToString('N')))
 New-Item -Path $tempRoot -ItemType Directory -Force | Out-Null
@@ -198,6 +224,9 @@ try {
         $zipHash = Get-PackageVerifierSha256 -Path $zipPath
         if ($zipHash -ne [string]$artifactReceipt.SHA256) {
             throw "Release receipt SHA256 mismatch for $zipName. Expected $($artifactReceipt.SHA256); got $zipHash."
+        }
+        if (-not $releaseChecksums.ContainsKey($zipName) -or $releaseChecksums[$zipName] -ne $zipHash) {
+            throw "Release checksum manifest mismatch for $zipName."
         }
 
         $extractRoot = Join-Path $tempRoot $packageName
@@ -236,6 +265,7 @@ try {
         Version      = $Version
         PackageRoot  = $packageRootPath
         ReceiptPath  = $receiptPath
+        ReleaseChecksumPath = $releaseChecksumPath
         VerifiedAt   = (Get-Date).ToString('o')
         Packages     = $packageResults
     }

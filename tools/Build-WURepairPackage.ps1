@@ -7,6 +7,22 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+$windowsSecurityModule = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+if (Test-Path -LiteralPath $windowsSecurityModule -PathType Leaf) {
+    Import-Module -Name $windowsSecurityModule -Force -ErrorAction Stop
+}
+else {
+    Import-Module -Name Microsoft.PowerShell.Security -Force -ErrorAction Stop
+}
+
+$windowsArchiveModule = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Archive\Microsoft.PowerShell.Archive.psd1'
+if (Test-Path -LiteralPath $windowsArchiveModule -PathType Leaf) {
+    Import-Module -Name $windowsArchiveModule -Force -ErrorAction Stop
+}
+else {
+    Import-Module -Name Microsoft.PowerShell.Archive -Force -ErrorAction Stop
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $repoRoot 'dist'
@@ -42,10 +58,22 @@ function Get-CodeSigningCertificate {
 function Copy-PackageFile {
     param(
         [string]$Source,
+        [string]$SourceRoot,
         [string]$DestinationRoot
     )
 
-    $destination = Join-Path $DestinationRoot (Split-Path -Leaf $Source)
+    $resolvedSource = (Resolve-Path -LiteralPath $Source).ProviderPath
+    $resolvedSourceRoot = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath.TrimEnd('\')
+    $sourcePrefix = "$resolvedSourceRoot\"
+    if (-not $resolvedSource.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Package source is outside the repository root: $resolvedSource"
+    }
+    $relativePath = $resolvedSource.Substring($sourcePrefix.Length)
+    $destination = Join-Path $DestinationRoot $relativePath
+    $destinationParent = Split-Path -Parent $destination
+    if (-not (Test-Path -LiteralPath $destinationParent)) {
+        New-Item -Path $destinationParent -ItemType Directory -Force | Out-Null
+    }
     Copy-Item -LiteralPath $Source -Destination $destination -Force
     return $destination
 }
@@ -136,6 +164,7 @@ function New-WURepairArtifact {
     param(
         [string]$Name,
         [string[]]$Files,
+        [string]$SourceRoot,
         [string]$StageRoot,
         [string]$OutputRoot,
         [AllowNull()][object]$Certificate
@@ -144,7 +173,7 @@ function New-WURepairArtifact {
     $artifactRoot = Join-Path $StageRoot $Name
     New-Item -Path $artifactRoot -ItemType Directory -Force | Out-Null
     foreach ($file in $Files) {
-        Copy-PackageFile -Source $file -DestinationRoot $artifactRoot | Out-Null
+        Copy-PackageFile -Source $file -SourceRoot $SourceRoot -DestinationRoot $artifactRoot | Out-Null
     }
 
     $signing = Sign-PackageScripts -Root $artifactRoot -Certificate $Certificate -TimestampServer $TimestampServer -RequireSignature:$RequireSignature
@@ -176,7 +205,7 @@ if (-not $SkipChecks) {
 
 $outputRoot = Resolve-OutputPath -Path $OutputPath
 Get-ChildItem -LiteralPath $outputRoot -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'WURepair-*.zip' -or $_.Name -like 'WURepair-release-*.json' } |
+    Where-Object { $_.Name -like 'WURepair-*.zip' -or $_.Name -like 'WURepair-release-*.json' -or $_.Name -like 'WURepair-v*-SHA256SUMS.txt' } |
     Remove-Item -Force
 
 $stageRoot = Join-Path $outputRoot ("stage_{0}" -f ([guid]::NewGuid().ToString('N')))
@@ -194,15 +223,22 @@ try {
         (Join-Path $repoRoot 'LICENSE'),
         (Join-Path $repoRoot 'CHANGELOG.md')
     )
+    $assetFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'assets') -Recurse -File | Select-Object -ExpandProperty FullName)
+    $commonFiles += $assetFiles
     $moduleFiles = $commonFiles + @(
         (Join-Path $repoRoot 'WURepair.psm1'),
         (Join-Path $repoRoot 'WURepair.psd1')
     )
 
     $artifacts = @(
-        New-WURepairArtifact -Name 'WURepair-script' -Files $commonFiles -StageRoot $stageRoot -OutputRoot $outputRoot -Certificate $certificate
-        New-WURepairArtifact -Name 'WURepair-module' -Files $moduleFiles -StageRoot $stageRoot -OutputRoot $outputRoot -Certificate $certificate
+        New-WURepairArtifact -Name 'WURepair-script' -Files $commonFiles -SourceRoot $repoRoot -StageRoot $stageRoot -OutputRoot $outputRoot -Certificate $certificate
+        New-WURepairArtifact -Name 'WURepair-module' -Files $moduleFiles -SourceRoot $repoRoot -StageRoot $stageRoot -OutputRoot $outputRoot -Certificate $certificate
     )
+    $releaseChecksumPath = Join-Path $outputRoot ("WURepair-v{0}-SHA256SUMS.txt" -f $version)
+    $releaseChecksumRows = @($artifacts | ForEach-Object {
+        '{0}  {1}' -f $_.SHA256, (Split-Path -Leaf $_.Path)
+    })
+    Set-Content -LiteralPath $releaseChecksumPath -Value $releaseChecksumRows -Encoding ASCII -Force
 
     $receipt = [ordered]@{
         Tool                  = 'WURepair'
@@ -211,6 +247,7 @@ try {
         SigningRequested      = -not [string]::IsNullOrWhiteSpace($CertificateThumbprint)
         RequireSignature      = [bool]$RequireSignature
         CertificateThumbprint = if ($certificate) { $certificate.Thumbprint } else { $null }
+        ReleaseChecksumPath   = $releaseChecksumPath
         Artifacts             = $artifacts
     }
     $receiptPath = Join-Path $outputRoot ("WURepair-release-v{0}.json" -f $version)

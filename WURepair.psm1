@@ -75,6 +75,7 @@ function Invoke-WURepair {
         [string]$SupportBundle,
         [string]$HtmlReport,
         [string]$WUfBDiagnostics,
+        [string]$TranscriptPath,
         [string]$JournalPath,
         [string]$RollbackJournal,
         [switch]$ApplyRollback,
@@ -84,7 +85,8 @@ function Invoke-WURepair {
         [switch]$PlainText,
         [switch]$Unattended,
         [switch]$WhatIf,
-        [switch]$InSafeMode
+        [switch]$InSafeMode,
+        [switch]$Demo
     )
 
     $arguments = New-Object 'System.Collections.Generic.List[string]'
@@ -116,12 +118,14 @@ function Invoke-WURepair {
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-Unattended' -Enabled ([bool]$Unattended)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-WhatIf' -Enabled ([bool]$WhatIf)
     Add-WURepairSwitchArgument -Arguments $arguments -Name '-InSafeMode' -Enabled ([bool]$InSafeMode)
+    Add-WURepairSwitchArgument -Arguments $arguments -Name '-Demo' -Enabled ([bool]$Demo)
 
     Add-WURepairValueArgument -Arguments $arguments -Name '-DismSource' -Value $DismSource
     Add-WURepairValueArgument -Arguments $arguments -Name '-JsonReport' -Value $JsonReport
     Add-WURepairValueArgument -Arguments $arguments -Name '-SupportBundle' -Value $SupportBundle
     Add-WURepairValueArgument -Arguments $arguments -Name '-HtmlReport' -Value $HtmlReport
     Add-WURepairValueArgument -Arguments $arguments -Name '-WUfBDiagnostics' -Value $WUfBDiagnostics
+    Add-WURepairValueArgument -Arguments $arguments -Name '-TranscriptPath' -Value $TranscriptPath
     Add-WURepairValueArgument -Arguments $arguments -Name '-JournalPath' -Value $JournalPath
     Add-WURepairValueArgument -Arguments $arguments -Name '-RollbackJournal' -Value $RollbackJournal
 
