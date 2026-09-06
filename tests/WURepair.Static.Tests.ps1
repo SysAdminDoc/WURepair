@@ -1301,8 +1301,8 @@ Describe 'WURepair static contract' {
 
         $readmePath = Join-Path $script:RepoRoot 'README.md'
         $readme = Get-Content -LiteralPath $readmePath -Raw
-        $readme | Should -Match ("Version-{0}-orange" -f [regex]::Escape($version))
-        $readme | Should -Match ("### v{0}" -f [regex]::Escape($version))
+        $readme | Should -Match ("Version-v{0}-" -f [regex]::Escape($version))
+        $readme | Should -Match ("What's new in v{0}" -f [regex]::Escape($version))
 
         $changelogPath = Join-Path $script:RepoRoot 'CHANGELOG.md'
         if (Test-Path -LiteralPath $changelogPath) {
@@ -1313,6 +1313,73 @@ Describe 'WURepair static contract' {
         $manifestPath = Join-Path $script:RepoRoot 'WURepair.psd1'
         $moduleManifest = Test-ModuleManifest -Path $manifestPath
         $moduleManifest.Version.ToString() | Should -Be $version
+    }
+
+    It 'runs the demo without elevation or machine inspection' {
+        $reportPath = Join-Path $TestDrive 'WURepair-demo.html'
+        $output = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script:ScriptPath -Demo -PlainText -HtmlReport $reportPath 2>&1
+        $exitCode = $LASTEXITCODE
+        $outputText = $output | Out-String
+
+        $exitCode | Should -Be 0
+        $outputText | Should -Match 'Safe repair preview'
+        $outputText | Should -Match 'DEMO DATA ONLY'
+        $outputText | Should -Match 'No system checks or repair actions were performed'
+        Test-Path -LiteralPath $reportPath -PathType Leaf | Should -BeTrue
+        $report = Get-Content -LiteralPath $reportPath -Raw
+        $report | Should -Match 'DEMO DATA'
+        $report | Should -Match 'data:image/png;base64,'
+        $report | Should -Match 'No data was uploaded'
+
+        $script:Content | Should -Not -Match '(?m)^\s*#Requires\s+-RunAsAdministrator'
+        $demoFunction = (Get-WURepairFunctionAst -Ast $script:Ast -Name 'Show-WURepairDemo').Extent.Text
+        $demoFunction | Should -Not -Match '(?i)Get-Service|Set-ItemProperty|Remove-Item|Restart-Service|sc\.exe'
+        $demoIndex = $script:Content.IndexOf('if ($Demo)')
+        $adminIndex = $script:Content.IndexOf('if (-not (Test-AdminRights))')
+        $demoIndex | Should -BeGreaterThan 0
+        $adminIndex | Should -BeGreaterThan $demoIndex
+    }
+
+    It 'ships valid brand and screenshot assets referenced by the README' {
+        Add-Type -AssemblyName System.Drawing
+        $minimumDimensions = [ordered]@{
+            'assets\brand\wurepair-1024.png'           = @(1024, 1024)
+            'assets\brand\wurepair-512.png'            = @(512, 512)
+            'assets\screenshots\01-repair-preview.png' = @(1000, 600)
+            'assets\social-preview.png'                 = @(1280, 640)
+        }
+        $readmeAssets = @(
+            'assets\brand\wurepair-512.png',
+            'assets\screenshots\01-repair-preview.png'
+        )
+        foreach ($relativePath in $minimumDimensions.Keys) {
+            $assetPath = Join-Path $script:RepoRoot $relativePath
+            Test-Path -LiteralPath $assetPath -PathType Leaf | Should -BeTrue
+            if ($relativePath -in $readmeAssets) {
+                $script:ReadmeContent | Should -Match ([regex]::Escape($relativePath.Replace('\', '/')))
+            }
+            $bitmap = [System.Drawing.Bitmap]::FromFile($assetPath)
+            try {
+                $bitmap.Width | Should -BeGreaterOrEqual $minimumDimensions[$relativePath][0]
+                $bitmap.Height | Should -BeGreaterOrEqual $minimumDimensions[$relativePath][1]
+            }
+            finally {
+                $bitmap.Dispose()
+            }
+        }
+
+        $brandPath = Join-Path $script:RepoRoot 'assets\brand\wurepair-1024.png'
+        $brand = [System.Drawing.Bitmap]::FromFile($brandPath)
+        try {
+            $brand.Width | Should -Be 1024
+            $brand.Height | Should -Be 1024
+            $brand.GetPixel(0, 0).A | Should -Be 0
+        }
+        finally {
+            $brand.Dispose()
+        }
+        Test-Path -LiteralPath (Join-Path $script:RepoRoot 'assets\brand\wurepair.ico') -PathType Leaf | Should -BeTrue
+        $script:ReadmeContent | Should -Not -Match 'icon\.svg|[^\x00-\x7F]'
     }
 
     It 'wires optional package and remediation artifact parse validation' {
@@ -1452,10 +1519,14 @@ Describe 'WURepair static contract' {
         $packageScript | Should -Match 'WURepair-module'
         $packageScript | Should -Match 'Test-WURepairPackage\.ps1'
         $packageScript | Should -Match 'PackageVerification'
+        $packageScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Security'
+        $packageScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Archive'
         $verifierScript | Should -Match 'Expand-Archive'
         $verifierScript | Should -Match 'Test-FileCatalog'
         $verifierScript | Should -Match 'Get-AuthenticodeSignature'
         $verifierScript | Should -Match 'Import-Module'
         $verifierScript | Should -Match 'SHA256SUMS\.txt'
+        $verifierScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Security'
+        $verifierScript | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Archive'
     }
 }

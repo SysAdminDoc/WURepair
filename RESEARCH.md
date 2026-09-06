@@ -1,7 +1,9 @@
-# Research - WURepair
+# WURepair research
 
 ## Executive Summary
-Verified: WURepair is a Windows PowerShell 5.1 Windows Update repair script/module for elevated local recovery of update services, stores, policies, network/TLS blockers, component-store corruption, servicing-stack failures, and diagnostic evidence collection. Its strongest current shape is automation-safe repair with timeout-safe `sc.exe` service control, JSON reports, redacted support bundles, mutation rollback journals, managed WSUS/WUfB guardrails, DISM source fallback, structured Windows Update log timelines, endpoint/policy manifests, module packaging, file catalogs, and local checks. Highest-value direction: strengthen operator trust and release contracts before adding more repair breadth. Priority opportunities: keep existing roadmap work for native `-WhatIf`, `-ListPending`, Intune, WEF, WinRE/QMR, GUI, and self-update; add repair-readiness gating for pending reboot/BitLocker risk; report system restore-point outcome in JSON/support artifacts; run every Pester test and pin validation-tool versions; enforce CLI/module/README option parity; schema-test JSON/support-bundle contracts; and verify release ZIPs from the consumer side.
+WURepair is a Windows PowerShell 5.1 script and module for local Windows Update recovery. It covers damaged services, caches, policy blockers, network failures, component-store corruption, and servicing-stack trouble. Version 2.32.0 now includes the trust work identified in this review: a no-admin demo, diagnostics-backed preview, managed-policy protection, readiness gates, rollback journals, local HTML and JSON evidence, redacted support bundles, complete local tests, and consumer-side package verification.
+
+The project should keep its repair focus. A resident agent, cloud dashboard, or broad patch manager would make privileged behavior harder to audit. The next useful improvements are Windows Event Forwarding support, a signed release path when a certificate is available, and an optional native interface that preserves the same preview and evidence model.
 
 ## Product Map
 - Core workflows: diagnostic pre-check; scoped/full repair planning; service/cache/policy/network/WaaS/Delivery Optimization/DISM/SFC/servicing-stack repair; Windows Update log analysis; JSON/support-bundle/rollback output.
@@ -19,27 +21,25 @@ Verified: WURepair is a Windows PowerShell 5.1 Windows Update repair script/modu
 - Microsoft platform docs: Intune Remediations, DISM source repair, WUA, Get-WindowsUpdateLog, WEF, QMR, restore points, BitLocker, signing, file catalogs, and Gallery publishing are the correct API boundaries for future work.
 
 ## Security, Privacy, and Reliability
-- Verified bug/risk: `Invoke-LocalChecks.ps1:75` runs Pester through explicit `-FullNameFilter` batches; local execution discovered 36 tests but ran them in two filtered groups, so future tests can be silently skipped if names miss the allowlist.
-- Verified bug/risk: `WURepair.ps1:5198` warns on pending reboot, but `Read-Confirmation -DefaultYes:$Unattended` at `WURepair.ps1:5224` means unattended/RMM runs can proceed through destructive phases with no explicit readiness gate.
-- Verified bug/risk: `WURepair.ps1` has no BitLocker readiness probe, while Microsoft System Restore and BitLocker docs show recovery and update/servicing flows can require BitLocker key awareness.
-- Verified bug/risk: `WURepair.ps1:5230`-`5240` attempts `Enable-ComputerRestore` and `Checkpoint-Computer`, but only logs success/failure; JSON reports and support bundles do not expose whether the promised restore point actually exists.
-- Verified bug/risk: `WURepair.ps1:5010`, `WURepair.ps1:5482`, `WURepair.psm1:50`, and `README.md:149` duplicate public option surfaces; existing tests validate module metadata but not full option/help/README parity.
-- Verified bug/risk: `Write-JsonRepairReport` hardcodes schema version and shape at `WURepair.ps1:4616`, and `New-WUSupportBundle` writes `manifest.json` at `WURepair.ps1:4928`; neither has schema/fixture compatibility tests for RMM/Intune/WEF consumers.
-- Verified bug/risk: `tools/Build-WURepairPackage.ps1:150` signs scripts, `:151` creates catalogs, `:152` writes checksums, and `:216` writes a release receipt, but there is no consumer-side ZIP verification/import smoke.
-- Missing guardrails: Intune package generation must respect detection/remediation separation, UTF-8 encoding, `exit 1` detection semantics, 2,048-character output, no reboot commands, and privacy guidance.
-- Missing guardrails: validation tooling should report Pester/PSScriptAnalyzer versions and enforce tested minimums; Pester 5.8.0 shipped on 2026-06-30 while the repo currently accepts any Pester 5.x.
-- Recovery and rollback needs: existing mutation journals and DISM source fallback are strong; remaining recovery work should add readiness gating, restore-point outcome reporting, native preview, safe-mode detection, WinRE/QMR diagnostics, and WEF-ready events before deeper offline mutation work.
+- Local checks now run the full Pester suite, report tool versions, and enforce tested minimums.
+- Pending reboot and BitLocker conditions now feed a repair-readiness gate before unattended repair continues.
+- Restore-point attempts and outcomes appear in JSON reports and support-bundle manifests.
+- Contract tests keep script, module, help, command-line parsing, and README options aligned.
+- JSON and support-bundle shapes have fixture tests for downstream automation.
+- Release verification now checks ZIP hashes, package contents, optional catalogs, script signatures, and module import from an extracted consumer copy.
+- Intune detection and remediation scripts keep their return-code and privacy contracts separate.
+- Recovery work now includes preview, safe-mode handling, WinRE and Quick Machine Recovery diagnostics, DISM source fallback, journals, and redaction. Windows Event Forwarding remains the main evidence gap.
 
 ## Architecture Assessment
 - Keep the script-first architecture: `WURepair.psm1` shells to `WURepair.ps1`, preserving CLI behavior for module users and avoiding a high-risk rewrite.
-- Add contract tests around public boundaries before adding flags: script parameters, module wrapper forwarding, CLI parser aliases, help text, README options, JSON report schema, support-bundle manifest, release receipt, and artifact contents.
-- Refactor candidates: `Start-WURepair` readiness/restore-point handling (`WURepair.ps1:5198`-`5240`), public option metadata shared by `Start-WURepair`/`Show-Help`/README, JSON sample generation around `Write-JsonRepairReport`, and a package verifier next to `tools/Build-WURepairPackage.ps1`.
-- Test gaps: local checks should run the full Pester suite by default, emit validation tool versions, and optionally produce Pester coverage without requiring online installs.
-- Documentation gaps: README covers current switches, but package verification, restore-point outcome semantics, readiness-block behavior, support-bundle schemas, and future Intune/WEF artifacts need usage docs in existing files only.
+- Contract tests now cover script parameters, module forwarding, command aliases, help text, README options, JSON schemas, the support-bundle manifest, release receipts, and packaged artifacts.
+- The remaining refactor candidate is shared option metadata. `Start-WURepair`, `Show-Help`, module forwarding, and the README still repeat parts of the public command surface.
+- The main test gap is a disposable administrator-level Windows VM for destructive phase integration. Local tests cover parsing, contracts, reports, preview behavior, and release consumption.
+- The README now explains preview, readiness gates, rollback, reporting, Intune use, package checksums, and signature expectations. Windows Event Forwarding needs documentation when that feature ships.
 - Accessibility: `-PlainText` is the right CLI accessibility path; future GUI work should wait behind preview/reporting/trust items already in the roadmap.
 - i18n/l10n: no UI localization is recommended now; correctness work should stay focused on endpoint manifests and structured parsing because repair output is operator-facing English.
 - Observability: transcript capture, schema-stable reports, readiness status, restore-point status, WEF-ready event IDs, and support-bundle manifests fit the project better than a resident agent.
-- Distribution/upgrade: package verification, Gallery pre-validation, validation-tool version contracts, and signed self-update checks are appropriate; GitHub Actions build/test workflows remain rejected by repo policy.
+- Distribution and upgrades: consumer-side package verification and validation-tool version contracts now ship. Gallery pre-validation and signed update checks remain appropriate future work; GitHub Actions build and test workflows remain rejected by repo policy.
 - Plugin ecosystem, mobile, multi-user, and cloud sync are rejected because WURepair is privileged local repair tooling; RMM/Intune should consume exported scripts/reports rather than delegate privileged mutation through plugins or a hosted service.
 
 ## Rejected Ideas
@@ -47,8 +47,8 @@ Verified: WURepair is a Windows PowerShell 5.1 Windows Update repair script/modu
 - Broad Windows repair suite modeled on Tweaking.com Windows Repair: too much ACL/registry blast radius for a Windows Update-focused repair tool.
 - Resident background agent or cloud dashboard from commercial RMM products: conflicts with WURepair's on-demand, auditable, local-elevation trust model.
 - Automatic BitLocker suspension: BitLocker status/readiness reporting is useful, but suspending encryption should remain an explicit operator action or separately named switch because it changes device security posture.
-- Plugin system for repair phases from adjacent sysadmin tooling: elevated mutation hooks would increase support and security risk more than they help.
-- Mobile companion app: no credible repair path because required operations need local elevated Windows access.
+- Plugin system for repair phases from adjacent sysadmin tooling: administrator-level mutation hooks would increase support and security risk more than they help.
+- Mobile companion app: no credible repair path because required operations need local administrator access to Windows.
 - Full localization project: not enough user-facing UI surface; regional endpoint correctness is already better served by the shipped knowledge manifest.
 - GitHub Actions validation copied from competitor repos: local policy forbids build/test workflows; keep verification in `Invoke-LocalChecks.ps1` and local packaging tools.
 
@@ -92,4 +92,4 @@ Dependency and security:
 - https://github.com/PowerShell/PowerShell/security/advisories
 
 ## Open Questions
-- None block prioritization. Implementation should still be validated on an elevated Windows 10/11 VM with Windows PowerShell 5.1, BitLocker enabled/disabled test cases, System Restore enabled/disabled/throttled cases, removable/mounted Windows media, a built release ZIP, and an Intune-like 64-bit host simulation.
+- None block prioritization. Implementation should still be validated on a Windows 10 or 11 VM running Windows PowerShell 5.1 as administrator. Test both BitLocker states, System Restore states, mounted repair media, a downloaded release ZIP, and an Intune-like 64-bit host.

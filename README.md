@@ -1,674 +1,271 @@
-<p align="center"><img src="icon.svg" width="128" height="128" alt="WURepair"></p>
+<p align="center">
+  <img src="assets/brand/wurepair-512.png" width="136" alt="WURepair logo">
+</p>
 
-# WURepair
+<h1 align="center">WURepair</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=for-the-badge&logo=windows" alt="Platform">
-  <img src="https://img.shields.io/badge/Language-PowerShell-5391FE?style=for-the-badge&logo=powershell" alt="PowerShell">
-  <img src="https://img.shields.io/badge/Version-2.31.0-orange?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
+  Diagnose a broken Windows Update stack, preview the repair plan, and keep the evidence needed to recover.
 </p>
 
 <p align="center">
-  <b>Comprehensive Windows Update Repair Tool</b><br>
-  <i>Fix Windows Update when nothing else works</i>
+  <img alt="Version" src="https://img.shields.io/badge/Version-v2.32.0-147DFF?style=flat-square">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-47EDB0?style=flat-square">
+  <img alt="Platform" src="https://img.shields.io/badge/Windows-10%20%7C%2011-70B7FF?style=flat-square">
+  <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-5.1%2B-8DA2BC?style=flat-square">
 </p>
 
----
+![WURepair showing a safe repair preview](assets/screenshots/01-repair-preview.png)
 
-## Overview
+Windows Update can fail after a debloat pass, damaged services, policy drift, a corrupt cache, or component-store trouble. WURepair turns that failure into an operator-readable diagnosis and a deliberate repair path.
 
-**WURepair** is a comprehensive repair tool that fixes Windows Update issues caused by privacy tools, malware, system corruption, or misconfiguration. It goes beyond basic troubleshooting by addressing root causes like hosts file blocks, disabled services, SSL/TLS misconfigurations, and blocking policies.
+The script checks readiness before it changes anything. It protects managed WSUS and Windows Update for Business settings by default, records repair phases, and keeps rollback evidence for the changes it can reverse.
 
-If you've run tools like [privacy.sexy](https://privacy.sexy), O&O ShutUp10, or Windows debloaters and now Windows Update won't work, this tool can help restore functionality.
+## Why operators use it
 
-## Features
+| | What you get |
+|---|---|
+| **Evidence before action** | Service state, cache health, DISM status, pending reboot, BitLocker posture, update errors, WinRE, and endpoint reachability in one pass. |
+| **A real preview** | `-WhatIf` shows the diagnostics-backed plan without running repair phases. `-Demo` shows the interface without inspecting the PC. |
+| **Policy-aware repair** | Managed update sources remain protected unless `-ResetManagedUpdatePolicy` is supplied explicitly. |
+| **Recovery records** | Cache backups, a mutation journal, restore-point outcomes, JSON, HTML, logs, and redacted support bundles. |
 
-### 🌐 Network & Connectivity Repairs
-- **Hosts File Cleanup**: Removes blocks for 25+ Microsoft update domains using a versioned Microsoft endpoint manifest, including regional Delivery Optimization hosts
-- **SSL/TLS Repair**: Enables TLS 1.2, configures .NET for strong cryptography
-- **Firewall Rules**: Removes blocking rules, ensures update services are allowed
-- **Winsock/TCP Reset**: Full network stack reset
-- **Proxy Cleanup**: Clears proxy settings that may interfere
+## Start safely
 
-### ⚙️ Service Repairs
-- **BITS Repair**: Fixes Background Intelligent Transfer Service dependencies and configuration
-- **Delivery Optimization**: Re-enables if disabled by privacy tools
-- **Service Dependencies**: Ensures RpcSs, EventSystem, SystemEventsBroker are running
-- **Correct Start Types**: Resets all update services to proper configurations
-- **WaaS / USO Repair**: Resets Update Orchestrator services and re-enables disabled USO scheduled tasks
-- **Delivery Optimization Reset**: Clears Delivery Optimization cache and removes stale download-mode policy values
+Download the script or module ZIP from the [latest release](https://github.com/SysAdminDoc/WURepair/releases/latest), then extract it to a working folder.
 
-### 📋 Policy & Registry Repairs
-- **Removes Blocking Policies**: Clears manifest-defined registry values that disable Windows Update
-- **WSUS Detection**: Identifies WSUS/SUP/WUfB source policy and preserves manifest-marked managed-source values unless explicitly reset
-- **Registry Cleanup**: Removes stuck reboot flags and pending update markers
-- **Group Policy Refresh**: Forces policy update after changes
+### 1. Try the product with demo data
 
-### 🔧 System Repairs
-- **SoftwareDistribution Reset**: Backs up and clears update cache
-- **Catroot2 Reset**: Clears cryptographic catalog cache
-- **DLL Re-registration**: Re-registers 35+ Windows Update DLLs
-- **DISM Integration**: Repairs component store corruption
-- **DISM Source Fallback**: Optional `-DismSource` uses mounted Windows media, `install.wim`, or `install.esd`; `-DismLimitAccess` prevents Windows Update source fallback
-- **Component Store Analysis**: Parses `DISM /AnalyzeComponentStore` and uses `/ResetBase` only when cleanup is recommended and reclaimable data is at least 1024 MB
-- **Servicing Stack Preflight**: Optional `-StageSSU` path downloads and installs an applicable Servicing Stack Update before DISM
-- **Catalog SSU Repair**: Optional `-RepairServicingStack` searches Microsoft Update Catalog, downloads the newest matching SSU `.msu`, validates SHA256 plus Microsoft Authenticode signature, and retries the next match if `wusa.exe` returns `0x800f0922`
-- **SFC Integration**: Scans and repairs system file integrity
+Demo mode needs no administrator rights. It performs no system checks and no repair actions.
 
-### 📊 Diagnostics & Verification
-- **Diagnostic Pre-Check Report**: Formatted status table showing service states, folder sizes, DISM health, pending reboot status, last successful update date, and last 5 Windows Update errors from event log
-- **Ranked HRESULT Summary**: Parses `%WINDIR%\WindowsUpdate.log` and converted Windows Update ETW traces into the top 10 recurring error codes with Microsoft reference links
-- **Structured Update Log Timeline**: Optional `-AnalyzeLogs` exports timestamped Windows Update log entries with component, level, HRESULT, source file, and redacted message fields
-- **WaaSMedic & Delivery Optimization Health**: Surfaces Windows Update Medic service state, recent medic warnings/errors, Delivery Optimization peer cache health, active jobs, peer counts, and transfer byte totals
-- **Update Health Tools Detection**: Detects Microsoft Update Health Tools / Windows Remediation presence, `uhssvc`, `sedsvc`, `sedlauncher`, remediation processes, and `rempl` scheduled tasks
-- **WSUS / SUP Posture**: Resolves `WUServer` / `WUStatusServer`, target group, `UseWUServer`, dual-scan, policy-driven update-source settings, and managed-source guardrail status
-- **WSUS Client Reset**: Optional `-ResetWSUSClient` flushes client identity values and requests fresh authorization/detection without removing WSUS policy
-- **WinRE & Quick Machine Recovery**: Reports WinRE enabled/disabled state, recovery partition path, image version, and Quick Machine Recovery policy status
-- **Safe Mode Diagnostics**: Detects normal, Minimal, Network, and Directory Services Repair Safe Mode sessions; `-InSafeMode` enables deeper locked-file cache cleanup
-- **Connectivity Testing**: Tests all Microsoft update endpoints
-- **LTSC/IoT Detection**: Identifies editions with limited update availability
-- **Post-repair Before/After Comparison**: Re-runs diagnostic check after repairs and displays side-by-side comparison table
-- **JSON RMM Report**: Optional `-JsonReport <path>` writes pre/post diagnostics, changed fields, service deltas, phase results, and run metadata
-- **HTML Repair Report**: Optional `-HtmlReport <path>` writes a local report with repair-plan/per-phase status and pending-update tables
-- **Pending Update Listing**: Optional `-ListPending` queries the Windows Update Agent for visible, not-installed software updates
-- **Support Bundle**: Optional `-SupportBundle <path>` writes a redacted zip with WURepair logs, JSON report, Windows Update log, event exports, and CBS/DISM tails
-- **Unattended Automation**: Optional `-Unattended` suppresses host UI/prompts/progress and returns stable exit codes for RMM tools
-- **Plain Text Output**: Optional `-PlainText` emits deterministic ASCII status lines for RMM consoles, screen readers, and log capture
-- **Repair Preview**: `-WhatIf` shows the diagnostics-backed repair plan and can write a preview JSON report without running mutation phases
-- **Mutation Journal & Rollback**: Writes a per-run JSON journal of hosts, registry, policy, and cache mutations; `-RollbackJournal` previews/apply reversible changes
-- **Module & Release Packaging**: `WURepair.psd1` / `WURepair.psm1` expose phase wrappers, and `tools\Build-WURepairPackage.ps1` builds script and module ZIPs with SHA256 receipts plus optional file catalogs/signing
-- **Progress Tracking**: Phase-by-phase progress bar with percentage (`Write-Progress`)
-- **Event Log Integration**: Writes repair summary to Windows Application event log (Source: `WURepair`) for RMM tool detection
-- **Selective Repair**: Run individual phases via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork`, `-RepairWaaS`, `-RepairDelivery`
-
-## Screenshots
-
-<p align="center">
-  <i>Diagnostics Output</i>
-</p>
-
-```
-    ╦ ╦╦ ╦  ╦═╗┌─┐┌─┐┌─┐┬┬─┐
-    ║║║║ ║  ╠╦╝├┤ ├─┘├─┤│├┬┘
-    ╚╩╝╚═╝  ╩╚═└─┘┴  ┴ ┴┴┴└─
-Windows Update Repair Tool v2.28.0
-
-======================================================================
-  DIAGNOSTICS - Gathering System Information
-======================================================================
-    OS: Microsoft Windows 11 Pro (10.0.22631) Build 22631
-    Architecture: 64-bit
-    System Drive: 150.32 GB free of 476.94 GB
-
-    Windows Update Service Status:
-      Windows Update: Stopped (Manual)
-      Background Intelligent Transfer Service: Running (Manual)
-      Cryptographic Services: Running (Automatic)
-      Delivery Optimization: Running (Automatic)
-
-[+] No pending reboot detected
-[+] No Microsoft blocks in hosts file
-
-======================================================================
-  CONNECTIVITY - Testing Windows Update Servers
-======================================================================
-[+] Windows Update: Reachable
-[+] Microsoft Update: Reachable
-[+] Download Center: Reachable
-[+] Windows Update Catalog: Reachable
-[+] Delivery Optimization: Reachable
-```
-
-## Requirements
-
-- **OS**: Windows 10 / Windows 11 (all editions including LTSC/IoT)
-- **Privileges**: Administrator
-- **PowerShell**: 5.1 or later (included with Windows)
-- **Disk Space**: At least 5 GB free recommended
-
-## Installation
-
-1. Download `WURepair.ps1` from the [Releases](../../releases) page
-2. Save to a convenient location (e.g., Desktop)
-
-To build local release artifacts from source:
 ```powershell
-.\tools\Build-WURepairPackage.ps1
-.\tools\Test-WURepairPackage.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\WURepair.ps1 -Demo
 ```
 
-## Usage
+Generate the matching local report:
 
-### Method 1: Right-Click Run
-1. Right-click `WURepair.ps1`
-2. Select **Run with PowerShell**
-3. If prompted by UAC, click **Yes**
-
-### Method 2: PowerShell Direct
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-.\WURepair.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\WURepair.ps1 -Demo -HtmlReport .\WURepair-demo.html
 ```
 
-### Command Line Options
+### 2. Preview the plan for this PC
 
-| Option | Description |
-|--------|-------------|
-| `-Quick` | Skip DISM and SFC scans (faster, less thorough) |
-| `-SkipDISM` | Skip only DISM component store repair |
-| `-SkipSFC` | Skip only System File Checker |
-| `-SkipBackup` | Skip backup of Windows Update folders |
-| `-StageSSU` | Before DISM, download and install an applicable Servicing Stack Update through Windows Update Agent |
-| `-DismSource <path>` | Use mounted Windows media, `install.wim`, or `install.esd` as the DISM `RestoreHealth` repair source |
-| `-DismLimitAccess` | Prevent DISM from using Windows Update as a repair source |
-| `-ResetPolicies` | Reset blocking Windows Update policies as a targeted phase while preserving managed source policy by default |
-| `-AnalyzeLogs` | Export a structured Windows Update log timeline and compact JSON summary |
-| `-ListPending` | List visible pending software updates from the Windows Update Agent; when combined with repair, query after repair |
-| `-ResetWSUSClient` | Reset managed WSUS client identity values and request a fresh authorization/detection cycle |
-| `-JsonReport <path>` | Write pre/post diagnostic delta as machine-parseable JSON |
-| `-SupportBundle <path>` | Create a redacted zip with WURepair log, JSON report, WindowsUpdate.log, relevant events, and CBS/DISM tails |
-| `-HtmlReport <path>` | Write a local HTML report with per-phase status and pending-update details |
-| `-WUfBDiagnostics <path>` | Create a zipped Windows Update for Business diagnostic bundle for upload or escalation |
-| `-JournalPath <path>` | Override the mutation journal JSON path |
-| `-RollbackJournal <path>` | Preview reversible changes from a mutation journal |
-| `-ApplyRollback` | Apply reversible changes when used with `-RollbackJournal` |
-| `-ResetManagedUpdatePolicy` | Remove managed WSUS/SUP/WUfB source policy values intentionally; default repair preserves them |
-| `-OverrideReadinessBlock` | Allow unattended repair to proceed when pending-reboot readiness is blocked; records the override in JSON output |
-| `-NoRedact` | Keep usernames, device names, profile paths, and SIDs in support bundles |
-| `-PlainText` | Emit deterministic ASCII output and suppress progress rendering |
-| `-WhatIf` | Preview diagnostics and planned phases without making system changes |
-| `-InSafeMode` | Confirm the current session is Safe Mode and enable deeper locked-file cache cleanup |
-| `-Unattended` | Suppress host UI/prompts/progress and return automation exit codes |
-| `-Help` | Display help information |
+Open PowerShell as administrator, then run:
 
-### Selective Repair Switches
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\WURepair.ps1 -WhatIf -JsonReport .\WURepair-preview.json
+```
 
-Run individual repair phases instead of the full pipeline:
+This gathers real diagnostics and writes the proposed phases. It does not run the repair phases.
 
-| Switch | Description |
-|--------|-------------|
-| `-RepairServices` | Only reset/restart Windows Update services |
-| `-RepairDLLs` | Only re-register Windows Update DLLs |
-| `-RepairStore` | Only rename SoftwareDistribution/catroot2 |
-| `-RepairDISM` | Only run DISM component store repair |
-| `-RepairSFC` | Only run System File Checker |
-| `-RepairNetwork` | Only reset network stack |
-| `-RepairWaaS` | Only reset Update Orchestrator services and USO tasks |
-| `-RepairDelivery` | Only reset Delivery Optimization cache and download mode |
-| `-RepairServicingStack` | Only download and install a matching Microsoft Update Catalog SSU package |
-| `-ResetPolicies` | Only remove blocking Windows Update policy values; managed sources remain protected unless explicitly overridden |
-| `-RepairAll` | Run all phases (default when no switch given) |
+### 3. Choose a targeted or full repair
 
-Switches can be combined (e.g., `-RepairStore -RepairDLLs`).
+Repair services and the update cache:
 
-### Unattended Exit Codes
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\WURepair.ps1 -RepairServices -RepairStore
+```
+
+Run the full guided repair:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\WURepair.ps1
+```
+
+Actual repair runs require administrator rights. DISM and SFC can take 20 to 45 minutes. Restart Windows before judging the final result.
+
+## What WURepair checks and repairs
+
+| Area | Diagnosis | Repair path |
+|---|---|---|
+| Update services | Windows Update, BITS, Cryptographic Services, Delivery Optimization, WaaSMedic, and Update Orchestrator | Restore start types, dependencies, service state, and disabled USO tasks |
+| Update stores | SoftwareDistribution, catroot2, Delivery Optimization cache, and pending operations | Back up and rebuild damaged caches |
+| Windows servicing | DISM health, component-store cleanup opportunity, SFC, WinRE, and Quick Machine Recovery | RestoreHealth, gated component cleanup, SFC, and optional SSU staging |
+| Network path | Microsoft endpoints, hosts file, proxy, Winsock, TCP/IP, firewall, and TLS | Remove verified blocks and repair update connectivity |
+| Policy | WSUS, SUP, Windows Update for Business, dual scan, and UI restrictions | Remove blocking values while preserving managed sources by default |
+| Update evidence | WindowsUpdate.log, ETW conversion, HRESULT ranking, event logs, and pending updates | Export a structured timeline, HTML, JSON, and a redacted support bundle |
+
+## Safety model
+
+- A readiness gate checks pending reboot and BitLocker risk before unattended repair continues.
+- Managed WSUS, SUP, and Windows Update for Business source policy is preserved unless you use `-ResetManagedUpdatePolicy`.
+- Store repair backs up cache folders unless `-SkipBackup` is supplied.
+- Hosts, registry, policy, and cache mutations are written to a per-run journal.
+- `-RollbackJournal <path>` previews reversible entries. Add `-ApplyRollback` only when you are ready to restore them.
+- Restore-point attempts and outcomes appear in JSON reports and support-bundle manifests.
+- DISM `/ResetBase` runs only when cleanup is recommended and at least 1024 MB is reclaimable.
+- Support bundles redact usernames, device names, profile paths, and SIDs unless `-NoRedact` is supplied.
+
+Some Windows repair operations cannot be undone. Read the preview, keep the journal, and use a tested device backup for important systems.
+
+## Reports and automation
+
+WURepair works as an interactive repair tool, an RMM-friendly script, or an Intune proactive remediation package.
+
+| Output | Use |
+|---|---|
+| `-JsonReport <path>` | Machine-readable options, readiness, phases, before and after diagnostics, and exit code |
+| `-HtmlReport <path>` | Portable local report for technicians, tickets, or escalation |
+| `-SupportBundle <path>` | Redacted ZIP with logs, reports, event exports, and CBS or DISM tails |
+| `-WUfBDiagnostics <path>` | Windows Update for Business diagnostic bundle |
+| `-TranscriptPath <path>` | Plain execution transcript for remote tooling |
+| `-PlainText` | Deterministic ASCII output for RMM consoles and screen readers |
+| `-Unattended` | No prompts or progress UI, with stable process exit codes |
+
+### Unattended exit codes
 
 | Code | Meaning |
-|------|---------|
+|---:|---|
 | `0` | Success |
 | `10` | Completed with warnings |
 | `20` | One or more repair phases reported errors |
-| `30` | Repair ran, but post-repair connectivity still failed |
-| `40` | Administrator rights missing |
-| `50` | Run cancelled before repair |
+| `30` | Repair completed, but endpoint verification still failed |
+| `40` | Administrator rights are missing |
+| `50` | Repair was cancelled before execution |
 
-### Examples
+## Common repair recipes
 
 ```powershell
-# Full repair (recommended)
-.\WURepair.ps1
-
-# Quick repair - skip lengthy scans
+# Fast pass without DISM or SFC
 .\WURepair.ps1 -Quick
 
-# Skip only DISM
-.\WURepair.ps1 -SkipDISM
+# Rebuild update services and stores
+.\WURepair.ps1 -RepairServices -RepairStore -RepairDLLs
 
-# Skip backup (if low on disk space)
-.\WURepair.ps1 -SkipBackup
-
-# Only reset services
-.\WURepair.ps1 -RepairServices
-
-# Reset data stores + re-register DLLs
-.\WURepair.ps1 -RepairStore -RepairDLLs
-
-# Run DISM with Servicing Stack Update preflight
-.\WURepair.ps1 -RepairDISM -StageSSU
-
-# Run DISM with a mounted ISO/WIM/ESD source and no Windows Update fallback
+# Use mounted Windows media for DISM with no online fallback
 .\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess
 
-# Preview a targeted policy reset without changing the machine
-.\WURepair.ps1 -ResetPolicies -WhatIf -JsonReport C:\Temp\WURepair-preview.json
-
-# List updates available to the Windows Update Agent
-.\WURepair.ps1 -ListPending
-
-# Reset a managed WSUS client identity and request re-registration
-.\WURepair.ps1 -ResetWSUSClient -JsonReport C:\Temp\WSUS-reset.json
-
-# Generate an operator-friendly HTML report after repair
-.\WURepair.ps1 -HtmlReport C:\Temp\WURepair-report.html
-
-# Run cache repair from Safe Mode with deeper locked-file cleanup
-.\WURepair.ps1 -RepairStore -InSafeMode
-
-# Export a structured Windows Update log timeline into JSON reporting
+# Inspect recent Windows Update errors and export JSON
 .\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json
 
-# Repair Servicing Stack directly from Microsoft Update Catalog
-.\WURepair.ps1 -RepairServicingStack
+# List updates visible to the Windows Update Agent
+.\WURepair.ps1 -ListPending
 
-# Full repair with RMM-readable JSON report
-.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json
+# Reset WSUS client identity without removing WSUS policy
+.\WURepair.ps1 -ResetWSUSClient -JsonReport C:\Temp\WSUS-reset.json
 
-# Full repair with a redacted support bundle
+# Create a redacted escalation bundle
 .\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip
 
-# Plain-text output for RMM consoles or screen readers
-.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json
-
-# RMM-safe run with no host UI and stable exit code
-.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json
-
-# RMM run that intentionally proceeds despite a pending-reboot readiness block
-.\WURepair.ps1 -Unattended -OverrideReadinessBlock -JsonReport C:\Temp\WURepair-report.json
-
-# Explicitly remove managed WSUS/SUP/WUfB source policy values
-.\WURepair.ps1 -ResetManagedUpdatePolicy
-
-# Preview reversible changes from a previous run
+# Preview a previous journal, then apply only after review
 .\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json
-
-# Apply reversible changes from a previous run
 .\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json -ApplyRollback
 ```
 
-### Local Validation
+## Full command reference
+
+<details>
+<summary>Show every supported option</summary>
+
+| Option | Purpose |
+|---|---|
+| `-Demo` | Show realistic sample output without checking or changing the PC |
+| `-Help` | Show built-in help |
+| `-Quick` | Skip DISM and SFC for a faster repair pass |
+| `-SkipDISM` | Skip DISM only |
+| `-SkipSFC` | Skip System File Checker only |
+| `-SkipBackup` | Skip extra update-store backups |
+| `-RepairServices` | Restore Windows Update service configuration |
+| `-RepairDLLs` | Re-register Windows Update components |
+| `-RepairStore` | Rebuild SoftwareDistribution and catroot2 |
+| `-RepairDISM` | Run DISM component-store repair |
+| `-RepairSFC` | Run System File Checker |
+| `-RepairNetwork` | Repair the update network path |
+| `-RepairWaaS` | Reset Update Orchestrator services and tasks |
+| `-RepairDelivery` | Reset Delivery Optimization cache and policy |
+| `-RepairServicingStack` | Download, validate, and install an applicable Catalog SSU |
+| `-ResetPolicies` | Remove blocking update policies while protecting managed sources |
+| `-RepairAll` | Select the full repair pipeline |
+| `-StageSSU` | Stage an applicable Servicing Stack Update before DISM |
+| `-DismSource <path>` | Use mounted Windows media, `install.wim`, or `install.esd` for RestoreHealth |
+| `-DismLimitAccess` | Prevent DISM from falling back to Windows Update |
+| `-AnalyzeLogs` | Export a structured Windows Update log timeline |
+| `-ListPending` | List visible, not-installed software updates |
+| `-ResetWSUSClient` | Reset WSUS client identity and request fresh authorization |
+| `-JsonReport <path>` | Write a machine-readable repair report |
+| `-HtmlReport <path>` | Write a portable local HTML report |
+| `-SupportBundle <path>` | Create a redacted escalation ZIP |
+| `-WUfBDiagnostics <path>` | Create a Windows Update for Business diagnostic ZIP |
+| `-TranscriptPath <path>` | Write a PowerShell transcript |
+| `-JournalPath <path>` | Choose the mutation journal path |
+| `-RollbackJournal <path>` | Preview reversible entries from a prior journal |
+| `-ApplyRollback` | Apply reversible entries with `-RollbackJournal` |
+| `-ResetManagedUpdatePolicy` | Intentionally remove managed update-source policy |
+| `-OverrideReadinessBlock` | Let unattended repair continue past a recorded readiness block |
+| `-NoRedact` | Keep device and identity details in support output |
+| `-PlainText` | Use deterministic ASCII output without progress rendering |
+| `-Unattended` | Suppress prompts and return automation exit codes |
+| `-WhatIf` | Gather diagnostics and preview planned repair phases |
+| `-InSafeMode` | Confirm Safe Mode and enable deeper locked-file cleanup |
+
+</details>
+
+## Intune proactive remediation
+
+The `Intune` folder contains separate detection and remediation scripts.
+
+1. Place `WURepair.ps1` at `%ProgramData%\WURepair\WURepair.ps1` on managed devices.
+2. Upload `Intune\Detect-WURepair.ps1` as the detection script.
+3. Upload `Intune\Remediate-WURepair.ps1` as the remediation script.
+4. Run in 64-bit PowerShell as SYSTEM, not as the signed-in user.
+
+Detection returns `0` for compliant devices and `1` when remediation is needed. Remediation writes its JSON report and mutation journal under `%ProgramData%\WURepair\Reports`.
+
+## Requirements
+
+- Windows 10 or Windows 11, including LTSC and IoT editions
+- Windows PowerShell 5.1 or later
+- Administrator rights for real diagnostics and repair
+- At least 5 GB free space, with 10 GB preferred for servicing work
+
+## Verify a release
+
+Each release publishes two ZIPs, a release receipt, and a SHA256 manifest. The ZIPs also contain per-file checksums and a file catalog when the current Windows host supports catalog creation.
+
+```powershell
+certutil -hashfile .\WURepair-script-v2.32.0.zip SHA256
+certutil -hashfile .\WURepair-module-v2.32.0.zip SHA256
+```
+
+Compare both values with `WURepair-v2.32.0-SHA256SUMS.txt`. Release scripts are not Authenticode-signed unless the release notes say otherwise.
+
+## Build and test
+
+Run the complete local gate:
 
 ```powershell
 .\Invoke-LocalChecks.ps1
 ```
 
-This runs PowerShell parser validation, PSScriptAnalyzer, and the Pester static-contract tests before release packaging.
+Build and verify both release packages:
 
-To check tool versions without running validation:
-```powershell
-.\Invoke-LocalChecks.ps1 -ListToolVersions
-```
-
-To include an opt-in coverage report:
-```powershell
-.\Invoke-LocalChecks.ps1 -CoverageOutputPath .\coverage\pester-coverage.xml
-```
-
-Local release packaging:
 ```powershell
 .\tools\Build-WURepairPackage.ps1
-.\tools\Build-WURepairPackage.ps1 -CertificateThumbprint '<thumbprint>' -RequireSignature
 .\tools\Test-WURepairPackage.ps1 -PackageRoot .\dist
 ```
 
-## What Gets Fixed
+Signing is optional when building locally:
 
-### Hosts File Domains Unblocked
-The tool removes blocks for these Microsoft domains (and more):
-
-| Domain | Purpose |
-|--------|---------|
-| `update.microsoft.com` | Windows Update service |
-| `download.windowsupdate.com` | Update downloads |
-| `download.delivery.mp.microsoft.com` | Delivery Optimization |
-| `ctldl.windowsupdate.com` | Certificate Trust List |
-| `settings-win.data.microsoft.com` | Windows settings sync |
-
-### Registry Policies Removed
-
-| Policy | Location |
-|--------|----------|
-| `DisableWindowsUpdateAccess` | Blocks WU UI access |
-| `DoNotConnectToWindowsUpdateInternetLocations` | Blocks online updates |
-| `NoAutoUpdate` | Disables automatic updates |
-| `UseWUServer` | Forces WSUS; preserved on managed devices unless `-ResetManagedUpdatePolicy` is supplied |
-| `SetDisableUXWUAccess` | Hides update settings |
-
-### Services Repaired
-
-| Service | Default State |
-|---------|---------------|
-| `wuauserv` (Windows Update) | Manual |
-| `bits` (BITS) | Manual (Delayed Start) |
-| `cryptsvc` (Cryptographic Services) | Automatic |
-| `dosvc` (Delivery Optimization) | Automatic (Delayed Start) |
-| `msiserver` (Windows Installer) | Manual |
-| `TrustedInstaller` (Modules Installer) | Manual |
-
-## Intune Proactive Remediation
-
-Deploy WURepair as an Intune proactive remediation to automatically detect and fix Windows Update issues across managed devices.
-
-### Setup
-
-1. Deploy `WURepair.ps1` to managed devices at `%ProgramData%\WURepair\WURepair.ps1`
-2. In Intune, create a new Proactive Remediation:
-   - **Detection script**: Upload `Intune\Detect-WURepair.ps1`
-   - **Remediation script**: Upload `Intune\Remediate-WURepair.ps1`
-   - **Run script in 64-bit PowerShell**: Yes
-   - **Run this script using the logged-on credentials**: No (run as SYSTEM)
-3. Assign to device groups and set a schedule
-
-### What the Detection Script Checks
-
-- Windows Update, BITS, and Cryptographic Services are not disabled
-- No Microsoft update domains are blocked in the hosts file
-- No blocking policies (`DisableWindowsUpdateAccess`, `NoAutoUpdate`, `SetDisableUXWUAccess`)
-- DISM component store is healthy
-- Microsoft update endpoints are reachable
-
-### Output
-
-- Detection: `Compliant` (exit 0) or `Non-compliant: N issue(s)` (exit 1)
-- Remediation: JSON report and mutation journal written to `%ProgramData%\WURepair\Reports\`
-
-## Troubleshooting
-
-### "Script won't run" / Execution Policy Error
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+.\tools\Build-WURepairPackage.ps1 -CertificateThumbprint '<thumbprint>' -RequireSignature
 ```
 
-### Still getting 403 Forbidden errors after repair
-- Check for third-party firewall software (Norton, McAfee, etc.)
-- Disable VPN temporarily
-- Check corporate proxy settings
-- Run the script again after restart
+## What's new in v2.32.0
 
-### BITS service still won't start
-1. Restart your computer
-2. Run the script again
-3. If still failing, check Event Viewer for BITS errors
+- Added a safe `-Demo` path that works without administrator rights or system inspection.
+- Redesigned local HTML reports around readiness, policy protection, recovery evidence, phase results, and pending updates.
+- Replaced the old generic artwork with a distinctive recovery-and-diagnostics identity, including transparent PNG and ICO assets.
+- Added verified product screenshots and a repository-ready social card.
+- Package builds now preserve the asset tree and publish a release-level SHA256 manifest.
+- Command-line and module runs now forward `-TranscriptPath` correctly.
+- Replaced Unicode console decoration with portable ASCII output for Windows PowerShell 5.1.
 
-### Updates found but won't install
-- Ensure at least 10 GB free disk space
-- Try installing updates one at a time
-- Run `DISM /Online /Cleanup-Image /RestoreHealth` manually
-- If Windows Update repair sources are blocked, mount matching Windows installation media and run `.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess`
-
-### LTSC/IoT Edition - Limited Updates
-Windows 10/11 LTSC and IoT editions only receive security updates. Feature updates are not available. This is by design, not a bug.
-
-## Files Created
-
-| File | Location | Purpose |
-|------|----------|---------|
-| `WURepair_[timestamp].log` | Desktop | Detailed operation log |
-| `WURepair_Journal_[timestamp].json` | Desktop | Machine-readable mutation journal and rollback data |
-| `WURepair-support.zip` | User-supplied `-SupportBundle` path | Redacted support bundle with logs, JSON report, event exports, WindowsUpdate.log, structured WU timeline, and CBS/DISM tails |
-| `SoftwareDistribution.bak.[timestamp]` | C:\Windows | Backup of update cache |
-| `catroot2.bak.[timestamp]` | C:\Windows\System32 | Backup of crypto cache |
-| `hosts.backup.[timestamp]` | C:\Windows\System32\drivers\etc | Backup of hosts file |
-
-## Recovery
-
-If something goes wrong:
-
-1. **System Restore**: The script creates a restore point before making changes
-2. **Mutation Journal**: Reversible hosts, registry, policy, and cache-folder mutations are written to `WURepair_Journal_[timestamp].json`
-3. **Folder Backups**: SoftwareDistribution and catroot2 are renamed, not deleted
-4. **Hosts Backup**: Original hosts file is preserved with timestamp
-
-To restore the hosts file manually:
-```powershell
-Copy-Item "C:\Windows\System32\drivers\etc\hosts.backup.[timestamp]" "C:\Windows\System32\drivers\etc\hosts" -Force
-```
-
-To preview or apply journal rollback:
-```powershell
-.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json
-.\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json -ApplyRollback
-```
-
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      WURepair v2.31.0 Flow                      │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Diagnostic Pre-Check Report (status table)                  │
-│  2. Create System Restore Point                                 │
-│  3. Run Diagnostics (OS, services, disk, connectivity)         │
-│  4. Repair Hosts File (remove Microsoft blocks)                 │
-│  5. Repair SSL/TLS (enable TLS 1.2, strong crypto)             │
-│  6. Repair Firewall Rules (allow update traffic)               │
-│  7. Repair Service Dependencies (BITS, DO)                      │
-│  8. Remove Blocking Policies (registry cleanup)                 │
-│  9. Stop Update Services                                        │
-│ 10. Backup & Clear Caches (SoftwareDistribution, catroot2)     │
-│ 11. Re-register DLLs (35+ Windows Update DLLs)                 │
-│ 12. Reset Network Stack (Winsock, TCP/IP, DNS, proxy)          │
-│ 13. Reset Windows Update Agent                                  │
-│ 14. Optional SSU staging before DISM (-StageSSU)                │
-│ 15. Optional verified Catalog SSU repair (-RepairServicingStack)│
-│ 16. Run DISM + optional local source + analyzed cleanup         │
-│ 17. Run SFC (system file check)                                │
-│ 18. Start Update Services                                       │
-│ 19. Refresh Group Policy                                        │
-│ 20. Post-Repair Connectivity Test                               │
-│ 21. Post-Repair Verification (before/after comparison)          │
-│ 22. Trigger Update Scan                                         │
-│ 23. Write Event Log Summary / JSON report / support bundle      │
-│ 24. Write mutation journal / exit code                          │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Privacy & Safety
-
-- ✅ **No data collection** - Everything runs locally
-- ✅ **No external downloads by default** - `-StageSSU` and `-RepairServicingStack` are opt-in update download paths; `-DismSource` can keep RestoreHealth on local media
-- ✅ **Open source** - Full source code available for review
-- ✅ **Creates backups** - Cache and registry repairs can be reversed; `/ResetBase` is intentionally permanent for superseded updates
-- ✅ **Restore point reporting** - Full repair attempts a system restore point and records success, skip, throttle, or failure details in JSON and support bundles
-- ✅ **Readiness checks** - JSON reports include pending-reboot and system-drive BitLocker status; unattended runs stop on pending-reboot readiness blocks unless `-OverrideReadinessBlock` is supplied
-- ✅ **Detailed logging** - Full audit trail saved to Desktop
-- ✅ **Redacted support bundles** - `-SupportBundle` redacts usernames, device names, profile paths, SIDs, and structured Windows Update log timeline messages unless `-NoRedact` is supplied
+See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 
 ## Contributing
 
-Contributions are welcome! If you encounter a Windows Update issue that WURepair doesn't fix:
-
-1. Run the script and save the log file
-2. Note any error messages
-3. Open an issue with the log and description
-
-## Changelog
-
-### Unreleased
-
-- Added `-WhatIf` read-only repair previews with optional JSON plan output.
-- Added targeted `-ResetPolicies` repair while preserving managed update-source policies by default.
-- Added Safe Mode diagnostics and explicit `-InSafeMode` locked-file cache cleanup.
-- Added WUA-backed `-ListPending` visibility and optional post-repair pending-update reporting.
-- Added `-ResetWSUSClient` for managed WSUS client identity reset and re-registration.
-- Added `-HtmlReport` with per-phase status and pending-update tables.
-
-### v2.31.0
-
-- Added `Intune\Detect-WURepair.ps1` detection script for Intune proactive remediations: checks service states, hosts file blocks, blocking policies, DISM health, and endpoint connectivity.
-- Added `Intune\Remediate-WURepair.ps1` remediation script: runs WURepair in unattended mode with JSON reporting and stable exit codes.
-
-### v2.30.0
-
-- Added WinRE diagnostics: reports Windows Recovery Environment enabled/disabled state, recovery partition path, and image version via `reagentc /info`.
-- Added Quick Machine Recovery policy detection from Group Policy and Update Orchestrator registry keys.
-
-### v2.29.0
-
-- Local validation now prints detected Pester and PSScriptAnalyzer versions and enforces tested minimums with actionable install/update guidance.
-- Added `-ListToolVersions` switch to `Invoke-LocalChecks.ps1` for no-network version diagnostics.
-
-### v2.28.0
-
-- Added `tools\Test-WURepairPackage.ps1` to verify release ZIP checksums, optional file catalogs, Authenticode status, release receipt parity, and extracted module import without touching installed modules.
-
-### v2.27.0
-
-- JSON reports and support-bundle manifests now record system restore-point attempted/skipped/succeeded/failed outcomes, including failure kind and error detail.
-
-### v2.26.0
-
-- Added repair-readiness gating that reports pending reboot and system-drive BitLocker risk before repair; unattended runs stop before destructive phases unless `-OverrideReadinessBlock` is supplied.
-
-### v2.25.0
-
-- JSON reports and support-bundle manifests now have generated schema fixture coverage, including required fields, schema versions, redaction markers, and bundled file entries.
-
-### v2.24.0
-
-- Added public option parity contract tests across script parameters, module wrapper forwarding, CLI parsing, help output, and README option tables.
-
-### v2.23.0
-
-- Local validation now runs the complete Pester suite by default instead of hard-coded name-filtered batches.
-- Added optional Pester coverage output with `.\Invoke-LocalChecks.ps1 -CoverageOutputPath <path>`.
-
-### v2.22.0
-
-- Versioned endpoint/policy knowledge manifest used by hosts cleanup and policy repair.
-- Regional Delivery Optimization host matching covers `*.dl.delivery.mp.microsoft.com` and `*.prod.do.dsp.mp.microsoft.com` entries in blocked hosts files.
-
-### v2.21.0
-- Added `WURepair.psd1` and `WURepair.psm1` module metadata/wrappers for phase-oriented invocation
-- Added `tools\Build-WURepairPackage.ps1` to build script and module ZIPs with local checks, SHA256 receipts, optional file catalogs, and optional Authenticode signing
-
-### v2.20.0
-- Added `-AnalyzeLogs` to export a structured Windows Update log timeline
-- Support bundles now include `logs/WURepair-wulog.json`
-- JSON reports include a compact Windows Update log timeline summary when log analysis runs
-
-### v2.19.0
-- Added behavior-level validation for CLI option parsing, phase selection, DISM source arguments, release version drift, and optional package/remediation artifact parsing
-
-### v2.18.0
-- Added `-DismSource <path>` for mounted Windows media, `install.wim`, or `install.esd` RestoreHealth repair sources
-- Added `-DismLimitAccess` to prevent Windows Update source fallback during DISM repair
-- JSON reports now include DISM source and `/LimitAccess` option fields
-
-### v2.17.0
-- Added `-PlainText` deterministic ASCII console output for automation logs and screen readers
-- Plain-text mode suppresses progress rendering and color-only status while preserving log file output
-
-### v2.16.0
-- Added `-SupportBundle <path>` to create redacted diagnostic zip archives
-- Support bundles include WURepair log, JSON report, WindowsUpdate.log, CBS/DISM tails, relevant event exports, and a manifest
-- Catalog package SHA256 validation now falls back to .NET hashing when `Get-FileHash` is unavailable
-
-### v2.15.0
-- Added managed update-source guardrails for WSUS/SUP/WUfB policy values
-- Full repair now preserves managed source policy by default and requires `-ResetManagedUpdatePolicy` for intentional removal
-
-### v2.14.0
-- Catalog SSU downloads now require SHA256 hashing plus valid Microsoft Authenticode signature before `wusa.exe` runs
-- JSON reports include Catalog package validation records with hash, signature status, and signer metadata
-
-### v2.13.0
-- Added per-run mutation journal JSON for hosts, registry, policy, and cache changes
-- Added `-RollbackJournal <path>` preview and `-ApplyRollback` restore mode for reversible journal entries
-- JSON reports now include mutation journal path and entry counts
-
-### v2.12.0
-- Added `-Unattended` mode for RMM/Intune/PDQ/Tanium runs
-- Replaced blocking service cmdlets with timeout-safe `sc.exe` service control
-- Phase results now report `Success`, `Warnings`, or `Errors` with warning/error counts, overall status, and automation exit code
-- Added `Invoke-LocalChecks.ps1` with parser, PSScriptAnalyzer, and Pester validation
-
-### v2.11.0
-- Added optional `-JsonReport <path>` output for RMM ingestion
-- JSON reports include run metadata, options, phase results, pre/post diagnostics, changed fields, and service deltas
-
-### v2.10.0
-- Added optional `-RepairServicingStack` Microsoft Update Catalog SSU repair path
-- Catalog repair downloads the newest matching SSU `.msu`, installs it with `wusa.exe /quiet /norestart`, and retries the next match on `0x800f0922`
-
-### v2.9.0
-- Added `DISM /AnalyzeComponentStore` parsing before component cleanup
-- `StartComponentCleanup /ResetBase` now runs only when cleanup is recommended and reclaimable component-store data is at least 1024 MB
-
-### v2.8.0
-- Added optional `-StageSSU` / `-StageServicingStack` preflight before DISM
-- Uses Windows Update Agent to find, download, and install the latest applicable Servicing Stack Update before `RestoreHealth`
-
-### v2.7.0
-- Added `-RepairDelivery` to reset Delivery Optimization cache and stale download-mode policy values
-- Full repair now includes Delivery Optimization cache/policy reset
-
-### v2.6.0
-- Added `-RepairWaaS` to reset Update Orchestrator services and USO scheduled tasks
-- Full repair now refreshes USO settings and re-enables disabled `\Microsoft\Windows\UpdateOrchestrator\*` tasks
-
-### v2.5.0
-- Added WSUS / SUP posture diagnostics for `WUServer`, `WUStatusServer`, target groups, `UseWUServer`, dual-scan, and policy-driven update source settings
-- Added DNS resolution summaries and posture warnings for mismatched or incomplete WSUS policy state
-
-### v2.4.0
-- Added Microsoft Update Health Tools / Windows Remediation detection
-- Added `uhssvc`, `sedsvc`, `sedlauncher`, remediation process, install path/version, and `rempl` task diagnostics
-
-### v2.3.0
-- Added WaaSMedic service/task/event diagnostics to the pre-check report
-- Added Delivery Optimization peer cache health, active job count, peer count, cache size, and transfer byte totals
-
-### v2.2.0
-- Added ranked Windows Update HRESULT diagnostics from `%WINDIR%\WindowsUpdate.log` and converted ETW traces
-- Added Microsoft reference links for the top recurring Windows Update error codes
-
-### v2.1.0
-- Diagnostic pre-check report with formatted status table (services, folders, DISM health, pending reboot, last update, recent errors)
-- Selective repair via `-RepairServices`, `-RepairDLLs`, `-RepairStore`, `-RepairDISM`, `-RepairSFC`, `-RepairNetwork` switches
-- Progress tracking with `Write-Progress` (Phase X of Y with percentage)
-- Event log integration: writes start/completion summary to Application log under source "WURepair"
-- Post-repair before/after comparison table
-- Triggers Windows Update check after all repairs
-
-### v2.0.0
-- Added hosts file cleanup for Microsoft domains
-- Added SSL/TLS configuration repair
-- Added firewall rules repair
-- Added service dependency repair (BITS, Delivery Optimization)
-- Added Windows Update policy removal
-- Added post-repair connectivity verification
-- Added LTSC/IoT edition detection
-- Improved service start logic (checks for disabled state)
-- Better error messages with actionable guidance
-
-### v1.0.0
-- Initial release
-- Basic service stop/start
-- Cache clearing
-- DLL re-registration
-- DISM/SFC integration
+Bug reports and focused pull requests are welcome. Include the Windows edition, the exact command, the unattended exit code if applicable, and a redacted report or support bundle.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Disclaimer
-
-This tool modifies Windows system settings, registry values, and network configuration. While it creates backups and is designed to be safe:
-
-- **Use at your own risk**
-- **Always have backups** of important data
-- **Test in a VM first** if unsure
-- **A restart is required** after running
-- The author is not responsible for any issues arising from use of this tool
-
-## Related Tools
-
-- [DefenderShield](../DefenderShield) - Repair Windows Defender and Firewall after privacy tools disable them
-
----
-
-<p align="center">
-  Made with ☕ by Matt
-</p>
+WURepair is available under the [MIT License](LICENSE).

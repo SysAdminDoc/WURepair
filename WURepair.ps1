@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.32.0 adds a safe product demo, branded local reports, and release artwork.
     v2.31.0 adds Intune proactive remediation detection and remediation scripts.
     v2.30.0 adds WinRE and Quick Machine Recovery diagnostics.
     v2.29.0 pins and reports local validation tool versions.
@@ -44,10 +45,11 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.31.0
+    Version: 2.32.0
 #>
 
-#Requires -RunAsAdministrator
+# Administrator rights are enforced inside Start-WURepair so help and demo
+# output remain available from a standard user session.
 
 # ============================================================================
 # CONFIGURATION
@@ -60,7 +62,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.31.0'
+    Version                            = '2.32.0'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -394,7 +396,7 @@ function Get-StatusTone {
 function Write-UiRule {
     param(
         [string]$Tone = 'Muted',
-        [string]$Character = '─',
+        [string]$Character = '-',
         [int]$Indent = 2,
         [int]$Width = 0
     )
@@ -432,7 +434,7 @@ function Write-UiHeader {
     }
 
     Write-Host ''
-    Write-UiRule -Tone $Tone -Character '═'
+    Write-UiRule -Tone $Tone -Character '='
     Write-Host ("  {0}" -f $Title) -ForegroundColor (Get-UiColor 'Title')
     if ($Subtitle) {
         Write-Host ("  {0}" -f $Subtitle) -ForegroundColor (Get-UiColor 'Info')
@@ -520,7 +522,7 @@ function Write-UiList {
                 Write-Host ("- {0}" -f $item)
                 continue
             }
-            Write-Host ("  • {0}" -f $item) -ForegroundColor (Get-UiColor $Tone)
+            Write-Host ("  > {0}" -f $item) -ForegroundColor (Get-UiColor $Tone)
         }
     }
 }
@@ -686,7 +688,7 @@ function Write-Log {
                         Write-Host ''
                     }
                     else {
-                        Write-Host ("  • {0}" -f $Message) -ForegroundColor (Get-UiColor 'Info')
+                        Write-Host ("  > {0}" -f $Message) -ForegroundColor (Get-UiColor 'Info')
                     }
                 }
             }
@@ -1149,11 +1151,68 @@ function Show-Banner {
 
     Clear-Host
     Write-Host ''
-    Write-UiRule -Tone 'Emphasis' -Character '═'
+    Write-UiRule -Tone 'Emphasis' -Character '='
     Write-Host ("  WURepair  v{0}" -f $Script:Config.Version) -ForegroundColor (Get-UiColor 'Accent')
     Write-Host '  Repair Windows Update with guided diagnostics, safer defaults, and clearer next steps.' -ForegroundColor (Get-UiColor 'Title')
     Write-Host '  Best used when updates are blocked by debloaters, policy drift, service damage, or cache corruption.' -ForegroundColor (Get-UiColor 'Info')
     Write-UiRule -Tone 'Emphasis'
+}
+
+function Show-WURepairDemo {
+    param([string]$HtmlReport)
+
+    Show-Banner
+    Write-UiHeader -Title 'Safe repair preview' -Subtitle 'Example data shows the operator experience without inspecting or changing this PC.' -Tone 'Accent'
+
+    Write-UiSubheading -Title 'System snapshot'
+    Write-UiMetric -Label 'Windows Update service' -Value 'Stopped (Manual)' -Tone 'Warning'
+    Write-UiMetric -Label 'BITS' -Value 'Running (Manual)' -Tone 'Success'
+    Write-UiMetric -Label 'Component store' -Value 'Repairable' -Tone 'Warning'
+    Write-UiMetric -Label 'Pending reboot' -Value 'No' -Tone 'Success'
+    Write-UiMetric -Label 'Managed update source' -Value 'Detected and preserved' -Tone 'Success'
+
+    Write-UiList -Title 'Proposed repair plan' -Items @(
+        '[1] Restore Windows Update service configuration',
+        '[2] Back up and rebuild the update cache',
+        '[3] Preserve managed WSUS and Windows Update for Business policy',
+        '[4] Verify update endpoints and post-repair readiness'
+    ) -Tone 'Accent'
+
+    Write-UiCallout -Title 'Preview protections are active.' -Tone 'Success' -Lines @(
+        'No services, files, registry values, policies, or scheduled tasks were changed.',
+        'Real repair runs create a mutation journal and keep recoverable cache backups.',
+        'Support bundles redact usernames, device names, profile paths, and SIDs by default.'
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($HtmlReport)) {
+        $demoStart = (Get-Date).AddSeconds(-8)
+        $demoEnd = Get-Date
+        $preReport = @{ RepairReadiness = [PSCustomObject]@{ Status = 'Review' } }
+        $postReport = @{ RepairReadiness = [PSCustomObject]@{ Status = 'Ready' } }
+        $phaseResults = @(
+            [PSCustomObject]@{ Name = 'System diagnostics'; Status = 'Success'; Warnings = 0; Errors = 0; DurationSeconds = 1.2 },
+            [PSCustomObject]@{ Name = 'Update service recovery'; Status = 'Preview'; Warnings = 0; Errors = 0; DurationSeconds = 0.4 },
+            [PSCustomObject]@{ Name = 'Update cache rebuild'; Status = 'Preview'; Warnings = 0; Errors = 0; DurationSeconds = 0.6 },
+            [PSCustomObject]@{ Name = 'Managed policy guardrail'; Status = 'Success'; Warnings = 0; Errors = 0; DurationSeconds = 0.2 },
+            [PSCustomObject]@{ Name = 'Endpoint verification'; Status = 'Success'; Warnings = 0; Errors = 0; DurationSeconds = 1.1 }
+        )
+        $pendingUpdates = [PSCustomObject]@{
+            QuerySucceeded = $true
+            Count          = 2
+            Updates        = @(
+                [PSCustomObject]@{ Title = 'Example Windows cumulative security update'; KBArticleIDs = @('Demo'); IsMandatory = $true; MaxDownloadSizeMB = 824 },
+                [PSCustomObject]@{ Title = 'Example .NET security update'; KBArticleIDs = @('Demo'); IsMandatory = $false; MaxDownloadSizeMB = 74 }
+            )
+        }
+        $resolvedReport = Write-HtmlRepairReport -Path $HtmlReport -StartTime $demoStart -EndTime $demoEnd -ModeLabel 'Demo repair preview' -OverallStatus 'Preview' -PreReport $preReport -PostReport $postReport -PhaseResults $phaseResults -PlannedSteps @() -PendingUpdates $pendingUpdates -Quiet
+        if ($resolvedReport) {
+            Write-UiMetric -Label 'Demo HTML report' -Value $resolvedReport -Tone 'Success'
+        }
+    }
+
+    Write-Host ''
+    Write-Host '  DEMO DATA ONLY. No system checks or repair actions were performed.' -ForegroundColor (Get-UiColor 'Warning')
+    return 0
 }
 
 function Test-AdminRights {
@@ -5239,7 +5298,8 @@ function Write-HtmlRepairReport {
         [hashtable]$PostReport,
         [object[]]$PhaseResults,
         [object[]]$PlannedSteps,
-        [object]$PendingUpdates
+        [object]$PendingUpdates,
+        [switch]$Quiet
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -5262,11 +5322,12 @@ function Write-HtmlRepairReport {
         }
         $duration = [math]::Round(($EndTime - $StartTime).TotalSeconds, 2)
         $phaseRows = @($PhaseResults | ForEach-Object {
-            '<tr><td>{0}</td><td class="status-{1}">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>' -f (& $encode $_.Name), (& $encode $_.Status), (& $encode $_.Warnings), (& $encode $_.Errors), (& $encode $_.DurationSeconds)
+            $statusClass = ([string]$_.Status) -replace '[^A-Za-z]', ''
+            '<tr><td><strong>{0}</strong></td><td><span class="status status-{1}">{2}</span></td><td>{3}</td><td>{4}</td><td>{5}</td></tr>' -f (& $encode $_.Name), $statusClass, (& $encode $_.Status), (& $encode $_.Warnings), (& $encode $_.Errors), (& $encode $_.DurationSeconds)
         })
         if ($phaseRows.Count -eq 0) {
             $phaseRows = @($PlannedSteps | ForEach-Object {
-                '<tr><td>{0}</td><td class="status-planned">Planned</td><td>-</td><td>-</td><td>-</td></tr>' -f (& $encode $_)
+                '<tr><td><strong>{0}</strong></td><td><span class="status status-planned">Planned</span></td><td>-</td><td>-</td><td>-</td></tr>' -f (& $encode $_)
             })
         }
         if ($phaseRows.Count -eq 0) {
@@ -5286,32 +5347,72 @@ function Write-HtmlRepairReport {
 
         $preReadiness = if ($PreReport) { $PreReport['RepairReadiness'] } else { $null }
         $postReadiness = if ($PostReport) { $PostReport['RepairReadiness'] } else { $null }
+        $brandPath = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { $null } else { Join-Path $PSScriptRoot 'assets\brand\wurepair-512.png' }
+        $brandMarkup = ''
+        if ($brandPath -and (Test-Path -LiteralPath $brandPath -PathType Leaf)) {
+            $brandBytes = [System.IO.File]::ReadAllBytes($brandPath)
+            $brandMarkup = '<img class="brand-mark" alt="WURepair" src="data:image/png;base64,{0}">' -f [Convert]::ToBase64String($brandBytes)
+        }
+        $reportLabel = if ($ModeLabel -match 'Demo') { 'DEMO DATA' } else { 'LOCAL REPORT' }
+        $startedLabel = $StartTime.ToString('MMM d, yyyy h:mm tt')
+        $overallStatusClass = ([string]$OverallStatus) -replace '[^A-Za-z]', ''
+        $style = @'
+<style>
+:root{color-scheme:dark;--bg:#07111f;--panel:#0c192b;--panel2:#102139;--line:#203754;--text:#f2f7ff;--muted:#91a4bd;--navy:#0a3278;--blue:#147dff;--mint:#47edb0;--amber:#f4c76b;--red:#ff7d8a}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(circle at 78% 4%,#102c52 0,#07111f 40%,#050c16 100%);color:var(--text);font-family:"Segoe UI Variable Text","Segoe UI",Arial,sans-serif;line-height:1.45}
+main{max-width:1180px;margin:0 auto;padding:56px 48px 44px}
+header{display:flex;align-items:center;justify-content:space-between;gap:32px;margin-bottom:28px}
+.identity{display:flex;align-items:center;gap:22px}.brand-mark{width:92px;height:92px;object-fit:contain}.eyebrow{margin:0 0 6px;color:var(--mint);font-size:12px;font-weight:750;letter-spacing:.16em}.title{margin:0;font-size:42px;letter-spacing:-.035em}.subtitle{max-width:650px;margin:8px 0 0;color:var(--muted);font-size:17px}.report-badge{align-self:flex-start;border:1px solid #28629f;border-radius:999px;background:#0d2b4e;color:#9bcfff;padding:8px 13px;font-size:12px;font-weight:750;letter-spacing:.1em;white-space:nowrap}
+.trust{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:0 0 24px}.trust-item{border:1px solid var(--line);border-radius:13px;background:rgba(12,25,43,.86);padding:15px 17px}.trust-label{display:block;margin-bottom:3px;color:var(--mint);font-size:11px;font-weight:750;letter-spacing:.11em}.trust-value{color:#dce8f7;font-size:14px}
+.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:32px}.card{min-height:104px;border:1px solid var(--line);border-radius:13px;background:linear-gradient(145deg,var(--panel2),var(--panel));padding:17px}.card-label{display:block;margin-bottom:9px;color:var(--muted);font-size:12px;font-weight:650;text-transform:uppercase;letter-spacing:.08em}.card-value{font-size:18px;font-weight:700}.card-detail{display:block;margin-top:5px;color:var(--muted);font-size:12px}
+section{margin-top:30px}.section-heading{display:flex;align-items:end;justify-content:space-between;gap:16px;margin-bottom:12px}h2{margin:0;font-size:22px;letter-spacing:-.015em}.section-note{color:var(--muted);font-size:13px}
+.table-shell{overflow:hidden;border:1px solid var(--line);border-radius:13px;background:rgba(12,25,43,.92)}table{width:100%;border-collapse:collapse}th,td{padding:13px 15px;text-align:left;border-bottom:1px solid #1b304a}th{background:#102541;color:#8fa9c8;font-size:11px;text-transform:uppercase;letter-spacing:.08em}td{color:#dce8f7;font-size:14px}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#10233b}
+.status{display:inline-flex;min-width:76px;justify-content:center;border:1px solid;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:750}.status-Success,.status-Ready{border-color:#23775c;background:#0d342b;color:#74f1bf}.status-Warnings,.status-planned,.status-Review{border-color:#84682c;background:#352a12;color:#f4cf7a}.status-Errors{border-color:#8b3b47;background:#371820;color:#ff9daa}.status-Preview{border-color:#2c65a5;background:#102e54;color:#92caff}
+footer{display:flex;justify-content:space-between;gap:24px;margin-top:28px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.local-note{color:#b9c9dc}
+@media(max-width:760px){main{padding:30px 20px}header{align-items:flex-start}.brand-mark{width:68px;height:68px}.title{font-size:32px}.trust,.meta{grid-template-columns:1fr}.report-badge{display:none}.table-shell{overflow-x:auto}footer{display:block}}
+</style>
+'@
         $html = @(
             '<!doctype html>',
-            '<html lang="en"><head><meta charset="utf-8"><title>WURepair report</title>',
-            '<style>body{font-family:Segoe UI,Arial,sans-serif;margin:2rem;color:#1f2937;background:#f8fafc}main{max-width:1100px;margin:auto;background:#fff;padding:2rem;border:1px solid #dbe3ec;border-radius:8px}h1,h2{color:#123b5d}table{border-collapse:collapse;width:100%;margin:1rem 0 2rem}th,td{border:1px solid #dbe3ec;padding:.5rem;text-align:left;vertical-align:top}th{background:#eef4f8}.status-Success{color:#087f23;font-weight:600}.status-Warnings,.status-planned{color:#9a6700;font-weight:600}.status-Errors{color:#b42318;font-weight:600}.status-Preview{color:#2563eb;font-weight:600}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.75rem}.card{background:#f8fafc;border:1px solid #e5e7eb;padding:.75rem;border-radius:5px}.muted{color:#64748b}</style></head><body><main>',
-            '<h1>WURepair report</h1>',
-            '<div class="meta">',
-            ('<div class="card"><strong>Mode</strong><br>{0}</div>' -f (& $encode $ModeLabel)),
-            ('<div class="card"><strong>Overall status</strong><br><span class="status-{0}">{0}</span></div>' -f (& $encode $OverallStatus)),
-            ('<div class="card"><strong>Started</strong><br>{0}</div>' -f (& $encode $StartTime.ToString('o'))),
-            ('<div class="card"><strong>Duration</strong><br>{0} seconds</div>' -f (& $encode $duration)),
-            ('<div class="card"><strong>Repair readiness before</strong><br>{0}</div>' -f (& $encode $(if ($preReadiness) { $preReadiness.Status } else { 'Not available' }))),
-            ('<div class="card"><strong>Repair readiness after</strong><br>{0}</div>' -f (& $encode $(if ($postReadiness) { $postReadiness.Status } else { 'Not available' }))),
+            '<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WURepair report</title>',
+            $style,
+            '</head><body><main>',
+            '<header>',
+            '<div class="identity">',
+            $brandMarkup,
+            '<div><p class="eyebrow">WINDOWS UPDATE RECOVERY</p><h1 class="title">WURepair report</h1><p class="subtitle">Repair evidence for the operator. Everything in this report was generated on this PC.</p></div>',
             '</div>',
-            '<h2>Repair phases</h2>',
-            '<table><thead><tr><th>Phase</th><th>Status</th><th>Warnings</th><th>Errors</th><th>Seconds</th></tr></thead><tbody>',
+            ('<span class="report-badge">{0}</span>' -f $reportLabel),
+            '</header>',
+            '<div class="trust">',
+            '<div class="trust-item"><span class="trust-label">LOCAL ONLY</span><span class="trust-value">No report data is uploaded.</span></div>',
+            '<div class="trust-item"><span class="trust-label">POLICY AWARE</span><span class="trust-value">Managed update sources stay protected by default.</span></div>',
+            '<div class="trust-item"><span class="trust-label">RECOVERY READY</span><span class="trust-value">Changes are journaled and supported by backups.</span></div>',
+            '</div>',
+            '<div class="meta">',
+            ('<div class="card"><span class="card-label">Mode</span><span class="card-value">{0}</span><span class="card-detail">Selected repair path</span></div>' -f (& $encode $ModeLabel)),
+            ('<div class="card"><span class="card-label">Overall status</span><span class="status status-{0}">{1}</span><span class="card-detail">Highest reported phase state</span></div>' -f $overallStatusClass, (& $encode $OverallStatus)),
+            ('<div class="card"><span class="card-label">Started</span><span class="card-value">{0}</span><span class="card-detail">Local device time</span></div>' -f (& $encode $startedLabel)),
+            ('<div class="card"><span class="card-label">Duration</span><span class="card-value">{0} seconds</span><span class="card-detail">End-to-end execution time</span></div>' -f (& $encode $duration)),
+            ('<div class="card"><span class="card-label">Readiness before</span><span class="card-value">{0}</span><span class="card-detail">Pending reboot and BitLocker gate</span></div>' -f (& $encode $(if ($preReadiness) { $preReadiness.Status } else { 'Not available' }))),
+            ('<div class="card"><span class="card-label">Readiness after</span><span class="card-value">{0}</span><span class="card-detail">Post-repair verification</span></div>' -f (& $encode $(if ($postReadiness) { $postReadiness.Status } else { 'Not available' }))),
+            '</div>',
+            '<section><div class="section-heading"><h2>Repair phases</h2><span class="section-note">Diagnostics, action, then verification</span></div>',
+            '<div class="table-shell"><table><thead><tr><th>Phase</th><th>Status</th><th>Warnings</th><th>Errors</th><th>Seconds</th></tr></thead><tbody>',
             ($phaseRows -join [Environment]::NewLine),
-            '</tbody></table>',
-            '<h2>Pending updates</h2>',
-            '<table><thead><tr><th>Title</th><th>KB</th><th>Mandatory</th><th>Size MB</th></tr></thead><tbody>',
+            '</tbody></table></div></section>',
+            '<section><div class="section-heading"><h2>Pending updates</h2><span class="section-note">Visible to the Windows Update Agent</span></div>',
+            '<div class="table-shell"><table><thead><tr><th>Title</th><th>KB</th><th>Mandatory</th><th>Size MB</th></tr></thead><tbody>',
             ($pendingRows -join [Environment]::NewLine),
-            '</tbody></table>',
-            '<p class="muted">Generated by WURepair locally. No data was uploaded.</p>',
+            '</tbody></table></div></section>',
+            '<footer><span class="local-note">Generated locally by WURepair. No data was uploaded.</span><span>Review logs and the mutation journal before closing the case.</span></footer>',
             '</main></body></html>'
         )
         Set-Content -LiteralPath $resolvedPath -Value ($html -join [Environment]::NewLine) -Encoding UTF8 -Force
-        Write-Log "HTML report written to: $resolvedPath" -Level SUCCESS
+        if (-not $Quiet) {
+            Write-Log "HTML report written to: $resolvedPath" -Level SUCCESS
+        }
         return $resolvedPath
     }
     catch {
@@ -5889,13 +5990,18 @@ function Start-WURepair {
         [switch]$PlainText,
         [switch]$Unattended,
         [switch]$WhatIf,
-        [switch]$InSafeMode
+        [switch]$InSafeMode,
+        [switch]$Demo
     )
 
     $Script:Config.Unattended = [bool]$Unattended
     $Script:Config.PlainText = [bool]$PlainText
     $Script:Config.WhatIf = [bool]$WhatIf
     $Script:Config.InSafeMode = [bool]$InSafeMode
+    if ($Demo) {
+        $Script:LastRunExitCode = Show-WURepairDemo -HtmlReport $HtmlReport
+        return $Script:LastRunExitCode
+    }
     Show-Banner
 
     if (-not (Test-AdminRights)) {
@@ -6017,7 +6123,7 @@ function Start-WURepair {
         Write-RepairEventLog -Message "WURepair v$($Script:Config.Version) started. Mode: $modeLabel" -EventId 1000
     }
 
-    # ── Diagnostic Pre-Check Report ──
+    # Diagnostic pre-check report
     $preReport = Get-DiagnosticReport
     $repairReadiness = Get-WURepairReadiness -DiagnosticReport $preReport -OverrideReadinessBlock:$OverrideReadinessBlock
     $preReport['RepairReadiness'] = $repairReadiness
@@ -6256,7 +6362,7 @@ function Start-WURepair {
 
     $restorePointOutcome = New-WURestorePointOutcome -SelectiveMode $selectiveMode -Description $restorePointDescription
 
-    # ── Build phase list for progress tracking ──
+    # Build phase list for progress tracking
     $phases = @()
     if (-not $selectiveMode) {
         $phases += @{ Name = 'Repair Hosts File';          Action = { Repair-HostsFile } }
@@ -6369,11 +6475,11 @@ function Start-WURepair {
         Write-Progress -Activity "WURepair v$($Script:Config.Version)" -Completed
     }
 
-    # ── Post-repair connectivity test ──
+    # Post-repair connectivity test
     Write-Log "POST-REPAIR CONNECTIVITY TEST" -Level SECTION
     $postConnectivity = Test-WindowsUpdateConnectivity
 
-    # ── Post-repair verification: re-run diagnostic and compare ──
+    # Post-repair verification: re-run diagnostic and compare
     $postReport = Get-DiagnosticReport
     Show-BeforeAfterComparison -Before $preReport -After $postReport
 
@@ -6385,7 +6491,7 @@ function Start-WURepair {
         Write-WUPendingUpdateSummary -PendingUpdates $pendingUpdates
     }
 
-    # ── Event log summary ──
+    # Event log summary
     $endTime = Get-Date
     $duration = $endTime - $startTime
     $durationMin = [math]::Round($duration.TotalMinutes, 1)
@@ -6505,6 +6611,7 @@ function Show-Help {
         '-SupportBundle <path> Create a redacted zip with logs, events, JSON, and CBS/DISM tails.',
         '-HtmlReport <path>    Write an operator-friendly HTML report with per-phase status.',
         '-WUfBDiagnostics <path>  Create a zipped Windows Update for Business diagnostic bundle.',
+        '-TranscriptPath <path>  Write a plain PowerShell transcript for remote tooling.',
         '-JournalPath <path>   Override the mutation journal JSON path.',
         '-RollbackJournal <path>  Preview reversible changes from a mutation journal.',
         '-ApplyRollback        Apply reversible changes when used with -RollbackJournal.',
@@ -6512,6 +6619,7 @@ function Show-Help {
         '-OverrideReadinessBlock  Allow unattended repair to proceed when readiness is blocked.',
         '-NoRedact             Keep usernames, device names, paths, and SIDs in support bundles.',
         '-PlainText            Emit deterministic ASCII output and suppress progress rendering.',
+        '-Demo                 Show realistic sample output without checking or changing the PC.',
         '-WhatIf               Preview diagnostics and planned phases without system changes.',
         '-InSafeMode           Confirm Safe Mode and enable deeper locked-file cache cleanup.',
         '-Unattended           Suppress host UI/prompts/progress and return automation exit codes.',
@@ -6533,6 +6641,7 @@ function Show-Help {
     )
 
     Write-UiList -Title 'Examples' -Items @(
+        '.\WURepair.ps1 -Demo',
         '.\WURepair.ps1',
         '.\WURepair.ps1 -Quick',
         '.\WURepair.ps1 -RepairServices',
@@ -6617,6 +6726,7 @@ if ($args -contains '-DismLimitAccess') { $params['DismLimitAccess'] = $true }
 if ($args -contains '-AnalyzeLogs') { $params['AnalyzeLogs'] = $true }
 if ($args -contains '-WhatIf') { $params['WhatIf'] = $true }
 if ($args -contains '-InSafeMode') { $params['InSafeMode'] = $true }
+if ($args -contains '-Demo') { $params['Demo'] = $true }
 
 $jsonReportPath = Get-CommandLineOptionValue -Arguments $args -Name '-JsonReport'
 if (-not [string]::IsNullOrWhiteSpace($jsonReportPath)) { $params['JsonReport'] = $jsonReportPath }
@@ -6629,6 +6739,9 @@ if (-not [string]::IsNullOrWhiteSpace($htmlReportPath)) { $params['HtmlReport'] 
 
 $wufbDiagnosticsPath = Get-CommandLineOptionValue -Arguments $args -Name '-WUfBDiagnostics'
 if (-not [string]::IsNullOrWhiteSpace($wufbDiagnosticsPath)) { $params['WUfBDiagnostics'] = $wufbDiagnosticsPath }
+
+$transcriptPath = Get-CommandLineOptionValue -Arguments $args -Name '-TranscriptPath'
+if (-not [string]::IsNullOrWhiteSpace($transcriptPath)) { $params['TranscriptPath'] = $transcriptPath }
 
 $journalPath = Get-CommandLineOptionValue -Arguments $args -Name '-JournalPath'
 if (-not [string]::IsNullOrWhiteSpace($journalPath)) { $params['JournalPath'] = $journalPath }
