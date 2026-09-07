@@ -4,6 +4,13 @@ All notable changes to WURepair will be documented in this file.
 
 ## [Unreleased]
 
+## [v2.32.2] (2026-09-07)
+
+- Preserved all three original logo concepts and the untouched recovery-ring master with selection metadata.
+- Added direct download and demo links, current product imagery, and clear example-data labels.
+- Corrected README and built-in help examples that could be mistaken for read-only log collection. Repair commands now select repair explicitly, and preview limitations are documented.
+- Refreshed the module's release note to describe the current delivery.
+
 ## [v2.32.1] (2026-09-06)
 
 - Release receipt schema 2 now records portable filenames instead of build and temporary paths.

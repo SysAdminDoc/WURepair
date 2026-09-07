@@ -7,6 +7,7 @@
     DISM/SFC integration, network resets, hosts file cleanup, firewall repair,
     SSL/TLS configuration, and detailed logging.
 
+    v2.32.2 preserves the original logo concepts and clarifies safe preview and repair examples.
     v2.32.1 makes release receipts portable and verifies the selected package folder first.
     v2.32.0 adds a safe product demo, branded local reports, and release artwork.
     v2.31.0 adds Intune proactive remediation detection and remediation scripts.
@@ -46,7 +47,7 @@
 .NOTES
     Author: Matt Parker
     Requires: Administrator privileges
-    Version: 2.32.1
+    Version: 2.32.2
 #>
 
 # Administrator rights are enforced inside Start-WURepair so help and demo
@@ -63,7 +64,7 @@ $Script:Config = @{
     Verbose        = $true
     CreateBackup   = $true
     FullReset      = $true
-    Version                            = '2.32.1'
+    Version                            = '2.32.2'
     EventSource                        = 'WURepair'
     ComponentStoreResetBaseThresholdMB = 1024
     CatalogMaxCandidates               = 5
@@ -6649,14 +6650,15 @@ function Show-Help {
         '.\WURepair.ps1 -RepairStore -RepairDLLs',
         '.\WURepair.ps1 -RepairDISM -StageSSU',
         '.\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess',
-        '.\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json',
+        '.\WURepair.ps1 -WhatIf -JsonReport C:\Temp\WURepair-preview.json',
+        '.\WURepair.ps1 -RepairAll -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -ListPending',
         '.\WURepair.ps1 -ResetWSUSClient -JsonReport C:\Temp\WSUS-reset.json',
         '.\WURepair.ps1 -HtmlReport C:\Temp\WURepair-report.html',
         '.\WURepair.ps1 -ResetPolicies -WhatIf',
         '.\WURepair.ps1 -RepairStore -InSafeMode',
         '.\WURepair.ps1 -JsonReport C:\Temp\WURepair-report.json',
-        '.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip',
+        '.\WURepair.ps1 -RepairAll -SupportBundle C:\Temp\WURepair-support.zip',
         '.\WURepair.ps1 -PlainText -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -Unattended -JsonReport C:\Temp\WURepair-report.json',
         '.\WURepair.ps1 -ResetManagedUpdatePolicy',
@@ -6667,7 +6669,9 @@ function Show-Help {
 
     Write-UiCallout -Title 'What the full repair flow covers' -Tone 'Info' -Lines @(
         'Hosts file cleanup, TLS repair, firewall and policy fixes, service reset, cache rebuild, DLL registration, network reset, DISM/SFC, and before/after verification.',
-        'Administrator privileges are required and a restart is normally needed at the end.'
+        'Administrator privileges are required and a restart is normally needed at the end.',
+        'Report switches do not make a run read-only. Use -WhatIf with JSON or HTML for a diagnostic preview.',
+        'Log timelines and support ZIPs are collected during repair, not in preview mode.'
     )
 }
 

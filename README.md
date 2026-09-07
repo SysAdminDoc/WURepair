@@ -5,26 +5,30 @@
 <h1 align="center">WURepair</h1>
 
 <p align="center">
-  Diagnose a broken Windows Update stack, preview the repair plan, and keep the evidence needed to recover.
+  Fix Windows Update with a plan you can review.
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/Version-v2.32.1-147DFF?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-v2.32.2-147DFF?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-47EDB0?style=flat-square">
   <img alt="Platform" src="https://img.shields.io/badge/Windows-10%20%7C%2011-70B7FF?style=flat-square">
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-5.1%2B-8DA2BC?style=flat-square">
 </p>
 
-![WURepair showing a safe repair preview](assets/screenshots/01-repair-preview.png)
+[Download for Windows](https://github.com/SysAdminDoc/WURepair/releases/latest) | [Try the safe demo](#1-try-the-product-with-demo-data) | [Review the safety model](#safety-model)
 
-Windows Update can fail after a debloat pass, damaged services, policy drift, a corrupt cache, or component-store trouble. WURepair turns that failure into an operator-readable diagnosis and a deliberate repair path.
+![WURepair showing its repair plan with example data](assets/screenshots/01-repair-preview.png)
+
+*Actual console capture in demo mode. The values are examples, not diagnostics from a real PC.*
+
+Stuck updates can have several causes. WURepair checks services, update caches, Windows servicing health, and network access, then shows the proposed repair phases before they run.
 
 The script checks readiness before it changes anything. It protects managed WSUS and Windows Update for Business settings by default, records repair phases, and keeps rollback evidence for the changes it can reverse.
 
 ## Why operators use it
 
 | | What you get |
-|---|---|
+| --- | --- |
 | **Evidence before action** | Service state, cache health, DISM status, pending reboot, BitLocker posture, update errors, WinRE, and endpoint reachability in one pass. |
 | **A real preview** | `-WhatIf` shows the diagnostics-backed plan without running repair phases. `-Demo` shows the interface without inspecting the PC. |
 | **Policy-aware repair** | Managed update sources remain protected unless `-ResetManagedUpdatePolicy` is supplied explicitly. |
@@ -77,7 +81,7 @@ Actual repair runs require administrator rights. DISM and SFC can take 20 to 45 
 ## What WURepair checks and repairs
 
 | Area | Diagnosis | Repair path |
-|---|---|---|
+| --- | --- | --- |
 | Update services | Windows Update, BITS, Cryptographic Services, Delivery Optimization, WaaSMedic, and Update Orchestrator | Restore start types, dependencies, service state, and disabled USO tasks |
 | Update stores | SoftwareDistribution, catroot2, Delivery Optimization cache, and pending operations | Back up and rebuild damaged caches |
 | Windows servicing | DISM health, component-store cleanup opportunity, SFC, WinRE, and Quick Machine Recovery | RestoreHealth, gated component cleanup, SFC, and optional SSU staging |
@@ -100,10 +104,12 @@ Some Windows repair operations cannot be undone. Read the preview, keep the jour
 
 ## Reports and automation
 
-WURepair works as an interactive repair tool, an RMM-friendly script, or an Intune proactive remediation package.
+Use WURepair interactively or call it from remote management tools. The repository also includes Intune detection and remediation scripts.
+
+Report switches do not make a command read-only. Use `-WhatIf` with `-JsonReport` or `-HtmlReport` to save a diagnostic preview. `-AnalyzeLogs` and `-SupportBundle` collect evidence during a repair run; preview mode does not produce their timeline or ZIP.
 
 | Output | Use |
-|---|---|
+| --- | --- |
 | `-JsonReport <path>` | Machine-readable options, readiness, phases, before and after diagnostics, and exit code |
 | `-HtmlReport <path>` | Portable local report for technicians, tickets, or escalation |
 | `-SupportBundle <path>` | Redacted ZIP with logs, reports, event exports, and CBS or DISM tails |
@@ -115,7 +121,7 @@ WURepair works as an interactive repair tool, an RMM-friendly script, or an Intu
 ### Unattended exit codes
 
 | Code | Meaning |
-|---:|---|
+| ---: | --- |
 | `0` | Success |
 | `10` | Completed with warnings |
 | `20` | One or more repair phases reported errors |
@@ -135,8 +141,11 @@ WURepair works as an interactive repair tool, an RMM-friendly script, or an Intu
 # Use mounted Windows media for DISM with no online fallback
 .\WURepair.ps1 -RepairDISM -DismSource D:\sources\install.wim -DismLimitAccess
 
-# Inspect recent Windows Update errors and export JSON
-.\WURepair.ps1 -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json
+# Preview diagnostics and save the plan without running repair phases
+.\WURepair.ps1 -WhatIf -JsonReport C:\Temp\WURepair-preview.json
+
+# Run the full repair and export its Windows Update log timeline
+.\WURepair.ps1 -RepairAll -AnalyzeLogs -JsonReport C:\Temp\WURepair-report.json
 
 # List updates visible to the Windows Update Agent
 .\WURepair.ps1 -ListPending
@@ -144,8 +153,8 @@ WURepair works as an interactive repair tool, an RMM-friendly script, or an Intu
 # Reset WSUS client identity without removing WSUS policy
 .\WURepair.ps1 -ResetWSUSClient -JsonReport C:\Temp\WSUS-reset.json
 
-# Create a redacted escalation bundle
-.\WURepair.ps1 -SupportBundle C:\Temp\WURepair-support.zip
+# Run the full repair and save a redacted escalation bundle
+.\WURepair.ps1 -RepairAll -SupportBundle C:\Temp\WURepair-support.zip
 
 # Preview a previous journal, then apply only after review
 .\WURepair.ps1 -RollbackJournal C:\Temp\WURepair_Journal.json
@@ -158,7 +167,7 @@ WURepair works as an interactive repair tool, an RMM-friendly script, or an Intu
 <summary>Show every supported option</summary>
 
 | Option | Purpose |
-|---|---|
+| --- | --- |
 | `-Demo` | Show realistic sample output without checking or changing the PC |
 | `-Help` | Show built-in help |
 | `-Quick` | Skip DISM and SFC for a faster repair pass |
@@ -223,11 +232,11 @@ Detection returns `0` for compliant devices and `1` when remediation is needed. 
 Each release publishes two ZIPs, a release receipt, and a SHA256 manifest. The ZIPs also contain per-file checksums and a file catalog when the current Windows host supports catalog creation.
 
 ```powershell
-certutil -hashfile .\WURepair-script-v2.32.1.zip SHA256
-certutil -hashfile .\WURepair-module-v2.32.1.zip SHA256
+certutil -hashfile .\WURepair-script-v2.32.2.zip SHA256
+certutil -hashfile .\WURepair-module-v2.32.2.zip SHA256
 ```
 
-Compare both values with `WURepair-v2.32.1-SHA256SUMS.txt`. Release scripts are not Authenticode-signed unless the release notes say otherwise.
+Compare both values with `WURepair-v2.32.2-SHA256SUMS.txt`. Release scripts are not Authenticode-signed unless the release notes say otherwise.
 
 ## Build and test
 
@@ -250,14 +259,17 @@ Signing is optional when building locally:
 .\tools\Build-WURepairPackage.ps1 -CertificateThumbprint '<thumbprint>' -RequireSignature
 ```
 
-## What's new in v2.32.1
+## What's new in v2.32.2
 
-- Release receipts now use portable filenames and no longer expose build-machine paths.
-- Package verification starts with the folder you selected, so a downloaded release cannot be replaced by a local build with the same name.
-- Receipt schema 2 keeps checksum, catalog, signature, and module-import evidence without temporary paths.
-- Release tools load the in-box security and archive modules even when another module path shadows them.
+- The download and safe demo are easier to find, with current screenshots labeled as example data.
+- Repair recipes now distinguish diagnostic previews from repair runs that collect logs or support bundles.
+- All three original logo concepts and the untouched selected master are preserved with the project.
 
 See [CHANGELOG.md](CHANGELOG.md) for prior releases.
+
+## Brand assets
+
+The recovery-ring logo remains the selected identity. The [concept archive](assets/brand/concepts) keeps every original direction, and [selection.json](assets/brand/concepts/selection.json) identifies the approved artwork. Keep the [selected master](assets/brand/wurepair-selected-master.png) unchanged; use the sized PNGs and icon in [assets/brand](assets/brand) for the product.
 
 ## Contributing
 
